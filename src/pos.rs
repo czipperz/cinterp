@@ -1,7 +1,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct Pos {
     file: Rc<String>,
     line: usize,
@@ -23,13 +23,19 @@ impl Pos {
     }
 }
 
+impl fmt::Debug for Pos {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "{}", self)
+    }
+}
+
 impl fmt::Display for Pos {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         write!(fmt, "{}:{}:{}:", self.file, self.line, self.column)
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct Tag<T> {
     pub value: T,
     pub pos: Pos,
@@ -46,6 +52,12 @@ impl<T> Tag<T> {
 
     pub fn map<F, U>(self, fun: F) -> Tag<U> where F: FnOnce(T) -> U {
         Tag { value: fun(self.value), pos: self.pos.clone() }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Tag<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "{:?} {:?}", self.pos, self.value)
     }
 }
 

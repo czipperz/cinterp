@@ -1,52 +1,60 @@
 use std::io;
+use std::fmt;
 use std::os::raw::*;
-use std::rc::Rc;
 use lex::*;
 use pos::*;
 use prefix::*;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Type {
-    name: Tag<TypeName>,
-    is_const: bool,
-    is_volatile: bool,
+    pub name: TypeName,
+    pub is_const: bool,
+    pub is_volatile: bool,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum TypeName {
+    Void,
     Int,
     Long,
     Custom(String),
     //Pointer(Box<Type>),
+    Array(Box<TypeName>, Option<Tag<Expression>>),
 }
 
-#[derive(Debug, PartialEq)]
+impl TypeName {
+    pub fn can_cast_to(&self, other: &TypeName) -> bool {
+        use TypeName::*;
+        match (self, other) {
+            (_, &Void) => true,
+            (&Int, &Long) => true,
+            (&Long, &Int) => true,
+            (a, b) => a == b,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Declaration {
-    type_: Type,
-    name: Tag<String>,
-    value: Option<Tag<Expression>>,
+    pub type_: Tag<Type>,
+    pub name: Tag<String>,
+    pub value: Option<Tag<Expression>>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Block {
-    declarations: Vec<Tag<Declaration>>,
-    statements: Vec<Tag<Statement>>,
+    pub declarations: Vec<Tag<Declaration>>,
+    pub statements: Vec<Tag<Statement>>,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Statement {
-    If(Tag<Expression>, Box<Tag<Statement>>, Option<Box<Tag<Statement>>>),
-    While(Tag<Expression>, Box<Tag<Statement>>),
-    Block(Block),
-    Expression(Expression),
-}
-use self::Statement::*;
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
-    Funcall(String, Vec<Tag<Expression>>),
+    Funcall(Box<Tag<Expression>>, Vec<Tag<Expression>>),
     Progn(Vec<Tag<Expression>>),
     Label(String),
+    Index(Box<Tag<Expression>>, Box<Tag<Expression>>),
+    Set(Box<Tag<Expression>>, Box<Tag<Expression>>),
+    Cast(Box<Tag<Type>>, Box<Tag<Expression>>),
     Int(c_int),
     Long(c_long),
     Void,
@@ -59,6 +67,144 @@ impl Tag<Expression> {
             Progn(vec) => vec,
             _ => vec![self],
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Statement {
+    If(Tag<Expression>, Box<Tag<Statement>>, Option<Box<Tag<Statement>>>),
+    While(Tag<Expression>, Box<Tag<Statement>>),
+    Block(Block),
+    Expression(Expression),
+}
+use self::Statement::*;
+
+impl fmt::Display for Type {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        if self.is_const {
+            try!(write!(fmt, "const "));
+        }
+        if self.is_volatile {
+            try!(write!(fmt, "volatile "));
+        }
+        write!(fmt, "{}", self.name)
+    }
+}
+
+impl fmt::Display for TypeName {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        use TypeName::*;
+        match self {
+            &Void => write!(fmt, "void"),
+            &Int => write!(fmt, "int"),
+            &Long => write!(fmt, "long"),
+            &Custom(ref c) => write!(fmt, "{}", c),
+            &Array(ref embedded, Some(ref expr)) => write!(fmt, "{}[{}]", embedded, expr.value),
+            &Array(ref embedded, None) => write!(fmt, "{}[]", embedded),
+        }
+    }
+}
+
+impl fmt::Display for Declaration {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        try!(write!(fmt, "{} ", self.type_.value));
+        try!(write!(fmt, "{}", self.name.value));
+        if let Some(ref expr) = self.value {
+            try!(write!(fmt, " = {}", expr.value));
+        }
+        write!(fmt, ";")
+    }
+}
+
+impl fmt::Display for Block {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        try!(write!(fmt, "{{"));
+        for declaration in &self.declarations {
+            try!(write!(fmt, "{} ", declaration.value));
+        }
+        for statement in &self.statements {
+            try!(write!(fmt, "{} ", statement.value));
+        }
+        write!(fmt, "}}")
+    }
+}
+
+fn fmt_list<'a, T: 'a + fmt::Display, I: Iterator<Item = &'a T>>(iter: I, fmt: &mut fmt::Formatter) -> fmt::Result {
+    let mut first = true;
+    for e in iter {
+        if first {
+            first = false;
+        } else {
+            try!(write!(fmt, ", "));
+        }
+        try!(write!(fmt, "{}", e));
+    }
+    Ok(())
+}
+
+fn parenthesize_progn(expression: &Expression, fmt: &mut fmt::Formatter) -> fmt::Result {
+    match expression {
+        expression@&Progn(_) => write!(fmt, "({})", expression),
+        expression => write!(fmt, "{}", expression),
+    }
+}
+
+impl fmt::Display for Expression {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Funcall(ref name, ref arguments) => {
+                try!(parenthesize_progn(&name.value, fmt));
+                try!(write!(fmt, ")"));
+                try!(fmt_list(arguments.iter().map(|t| &t.value), fmt));
+                write!(fmt, ")")
+            },
+            &Progn(ref expressions) => fmt_list(expressions.iter().map(|t| &t.value), fmt),
+            &Label(ref l) => write!(fmt, "{}", l),
+            &Index(ref expression, ref index) => {
+                try!(parenthesize_progn(&expression.as_ref().value, fmt));
+                write!(fmt, "[{}]", index.value)
+            },
+            &Set(ref name, ref value) => {
+                try!(parenthesize_progn(&name.as_ref().value, fmt));
+                try!(write!(fmt, " = "));
+                parenthesize_progn(&value.as_ref().value, fmt)
+            },
+            &Cast(ref type_, ref expression) => {
+                try!(write!(fmt, "({})", type_.value));
+                parenthesize_progn(&expression.as_ref().value, fmt)
+            },
+            &Int(i) => write!(fmt, "{}", i),
+            &Long(l) => write!(fmt, "{}", l),
+            &Void => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for Statement {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &If(ref cond, ref true_, ref false_) => {
+                try!(write!(fmt, "if ({}) {}", cond.value, true_.value));
+                if let &Some(ref false_) = false_ {
+                    write!(fmt, "else {}", false_.value)
+                } else {
+                    Ok(())
+                }
+            },
+            &While(ref cond, ref body) => write!(fmt, "while ({}) {}", cond.value, body.value),
+            &Block(ref block) => write!(fmt, "{}", block),
+            &Expression(ref expression) => write!(fmt, "{};", expression),
+        }
+    }
+}
+
+fn parse_top_level<I: Iterator<Item = Tag<Token>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
+                                                   -> io::Result<(Option<Tag<Token>>, Tag<Declaration>)> {
+    let (n, d) = try!(parse_maybe_variable_declaration(first, tokens));
+    match d {
+        Ok(d) => Ok((n, d)),
+        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                     format!("{} Only declarations are allowed at the top level", e.pos))),
     }
 }
 
@@ -139,8 +285,17 @@ fn parse_statement<I: Iterator<Item = Tag<Token>>>(first: Tag<Token>, tokens: &m
             }
         },
         Token::OpenParen => {
-            let (next, expr) = try!(parse_paren(&first.pos, tokens));
-            Ok((next, expr.map(Expression)))
+            let first_pos = first.pos.clone();
+            let (next, expr) = try!(parse_expression(first, tokens));
+            match next {
+                Some(Tag { value: Token::Semicolon, pos: _ }) =>
+                    Ok((tokens.next(), expr.map(Expression))),
+                Some(Tag { value: _, pos }) =>
+                    Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                       format!("{} Expected semicolon here", pos))),
+                None => Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                           format!("{} Expected semicolon at end of statement started here", first_pos))),
+            }
         },
         Token::OpenCurly => {
             let mut declarations = Vec::new();
@@ -186,15 +341,10 @@ fn parse_statement<I: Iterator<Item = Tag<Token>>>(first: Tag<Token>, tokens: &m
             }
             Ok((tokens.next(), first.with_value(Block(Block { declarations, statements }))))
         },
-        Token::CloseParen => {
+        _ => {
             Err(io::Error::new(io::ErrorKind::InvalidInput,
-                               format!("{} Unexpected `)` here", first.pos)))
+                               format!("{} Invalid start of a statement", first.pos)))
         },
-        Token::CloseCurly => {
-            Err(io::Error::new(io::ErrorKind::InvalidInput,
-                               format!("{} Unexpected `}}` here", first.pos)))
-        },
-        _ => unimplemented!("{:?}", first),
     }
 }
 
@@ -210,11 +360,10 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = Tag<Token>>>(first: Tag<T
             Some(n) => match n.value {
                 Token::KeywordInt => {
                     if embedded_type_name.is_some() {
-                        println!("{:?}", embedded_type_name);
                         return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                   format!("{} Unexpected keyword `int` after type declaration", n.pos)));
                     } else {
-                        embedded_type_name = Some(Tag::new(TypeName::Int, n.pos));
+                        embedded_type_name = Some((TypeName::Int, n.pos));
                         next = tokens.next();
                     }
                 },
@@ -223,13 +372,13 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = Tag<Token>>>(first: Tag<T
                         return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                   format!("{} Unexpected keyword `long` after type declaration", n.pos)));
                     } else {
-                        embedded_type_name = Some(Tag::new(TypeName::Long, n.pos));
+                        embedded_type_name = Some((TypeName::Long, n.pos));
                         next = tokens.next();
                     }
                 },
                 Token::Label(label) => match embedded_type_name {
-                    Some(type_name) => {
-                        let type_ = Type { name: type_name, is_const, is_volatile };
+                    Some((type_name, type_pos)) => {
+                        let type_ = Tag::new(Type { name: type_name, is_const, is_volatile }, type_pos);
                         let next = tokens.next();
                         match next {
                             Some(Tag { value: Token::Semicolon, pos: _ }) => {
@@ -237,18 +386,79 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = Tag<Token>>>(first: Tag<T
                                            Ok(Tag::new(Declaration { type_, name: Tag::new(label, n.pos), value: None },
                                                        first_pos))));
                             },
+                            Some(Tag { value: Token::Set, pos }) => {
+                                let (next, value) = try!(parse_expression(try!(tokens.next().ok_or_else(
+                                    || io::Error::new(io::ErrorKind::InvalidInput,
+                                                      format!("{} Found EOF after `=` here, expected an expression", pos)))), tokens));
+                                match next {
+                                    Some(Tag { value: Token::Semicolon, pos: _ }) => {
+                                        return Ok((tokens.next(),
+                                           Ok(Tag::new(Declaration {
+                                               type_,
+                                               name: Tag::new(label, n.pos),
+                                               value: Some(value),
+                                           }, first_pos))));
+                                    },
+                                    Some(Tag { value: _, pos }) => {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                  format!("{} Expected semicolon here", pos)));
+                                    },
+                                    None => {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                  format!("{} Found EOF after variable declaration starting here, expected a  `;`", first_pos)));
+                                    }
+                                }
+                            },
+                            Some(Tag { value: Token::OpenSquare, pos }) => {
+                                let (next, expr) = try!(parse_expression(try!(tokens.next().ok_or_else(
+                                    || io::Error::new(io::ErrorKind::InvalidInput,
+                                                      format!("{} ", pos)))), tokens));
+                                match next {
+                                    Some(Tag { value: Token::CloseSquare, pos: _ }) => {
+                                        match tokens.next() {
+                                            Some(Tag { value: Token::Semicolon, pos: _ }) => {
+                                                return Ok((tokens.next(),
+                                                           Ok(Tag::new(Declaration {
+                                                               type_: Tag::new(Type {
+                                                                   name: TypeName::Array(Box::new(type_.value.name),
+                                                                                         Some(expr)),
+                                                                   is_const: type_.value.is_const, is_volatile: type_.value.is_volatile },
+                                                                               type_.pos),
+                                                               name: Tag::new(label, n.pos), value: None },
+                                                                       first_pos))));
+                                            },
+                                            Some(Tag { value: _, pos }) => {
+                                                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                          format!("{} Expected semicolon here", pos)));
+                                            },
+                                            None => {
+                                                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                          format!("{} Found EOF after variable declaration starting here, expected a  `;`", first_pos)));
+                                            }
+                                        }
+                                    },
+                                    Some(Tag { value: _, pos }) => {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                  format!("{} Expected `]` here", pos)));
+                                    },
+                                    None => {
+                                        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                  format!("{} Found EOF, expected `]` to close `[` here", pos)));
+                                    }
+                                }
+                            },
                             Some(Tag { value: _, pos }) => {
                                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                           format!("{} Expected semicolon here", pos)));
                             },
                             None => {
                                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                                          format!("{} Found EOF after variable declaration here, expected a `;`", first_pos)));
+                                                          format!("{} Found EOF after variable declaration starting here, expected a `;`", first_pos)));
                             }
                         }
                     },
                     None => {
-                        embedded_type_name = Some(Tag::new(TypeName::Custom(label), n.pos));
+                        embedded_type_name = Some((TypeName::Custom(label), n.pos));
                         next = tokens.next();
                     },
                 },
@@ -271,7 +481,7 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = Tag<Token>>>(first: Tag<T
                 _ => {
                     // Maybe got a type name but no variable name
                     match embedded_type_name {
-                        Some(Tag { value: TypeName::Custom(label), pos }) => {
+                        Some((TypeName::Custom(label), pos)) => {
                             if !is_const && !is_volatile {
                                 tokens.push(n);
                                 let (next, statement) = try!(parse_statement(
@@ -282,7 +492,8 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = Tag<Token>>>(first: Tag<T
                         },
                         None => {
                             if !is_const && !is_volatile {
-                                return Ok((tokens.next(), Err(Tag::new(Expression(Void), n.pos))));
+                                let (next, statement) = try!(parse_statement(n, tokens));
+                                return Ok((next, Err(statement)));
                             } else {
                                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                           format!("{} Expected a type and then a variable name to finish the declaration", n.pos)));
@@ -302,53 +513,105 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = Tag<Token>>>(first: Tag<T
 
 fn parse_paren<I: Iterator<Item = Tag<Token>>>(open_paren_pos: &Pos, tokens: &mut PrefixIterator<I>)
                                                -> io::Result<(Option<Tag<Token>>, Tag<Expression>)> {
-    let (next, expression) =
-        try!(parse_expression(try!(tokens.next().ok_or_else(
-            || io::Error::new(io::ErrorKind::InvalidInput,
-                              format!("{} Found EOF when expected `)`", open_paren_pos)))), tokens));
+    let first = try!(tokens.next().ok_or_else(
+        || io::Error::new(io::ErrorKind::InvalidInput,
+                          format!("{} Found EOF when expected `)`", open_paren_pos))));
+    let (next, expression) = try!(parse_expression(first, tokens));
     match next {
-        Some(other) => if other.value == Token::CloseParen {
-            Ok((tokens.next(), expression))
-        } else {
-            Err(io::Error::new(io::ErrorKind::InvalidInput,
-                               format!("{} Expected a `)` here", other.pos)))
-        },
+        Some(Tag { value: Token::CloseParen, pos: _ }) => Ok((tokens.next(), expression)),
+        Some(Tag { value: _, pos }) => Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                          format!("{} Expected a `)` here", pos))),
         None => Err(io::Error::new(io::ErrorKind::InvalidInput,
                                    format!("{} Found EOF when expected a `)` to close the `(` here", open_paren_pos))),
     }
 }
 
-fn parse_expression<I: Iterator<Item = Tag<Token>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
-                                                    -> io::Result<(Option<Tag<Token>>, Tag<Expression>)> {
-    match first.value {
-        Token::Label(first_name) => {
-            match tokens.next() {
-                Some(second) =>
-                    match second.value {
-                        Token::OpenParen => {
-                            let (next, expression) = try!(parse_paren(&second.pos, tokens));
-                            Ok((next, Tag::new(Funcall(first_name, expression.to_progn()), first.pos)))
-                        },
-                        Token::CloseParen | Token::Semicolon | Token::CloseCurly => {
-                            Ok((Some(second), Tag::new(Label(first_name), first.pos)))
-                        },
-                        Token::Comma => {
-                            parse_comma(Tag::new(Label(first_name), first.pos), &second.pos, tokens)
-                        },
-                        Token::Label(_) | Token::Const | Token::Volatile =>
-                            Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                               format!("{} Unexpected variable declaration here, only expressions are allowed", first.pos))),
-                        _ => unimplemented!("{:?}", second),
-                    },
-                None => Ok((None, Tag::new(Label(first_name), first.pos))),
-            }
+fn parse_type<I: Iterator<Item = Tag<Token>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
+                                              -> io::Result<(Option<Tag<Token>>, Tag<Type>)> {
+    let mut next = Some(first);
+    loop {
+        match next {
+            Some(nextu) => match nextu.value {
+                Token::Const => {
+                    
+                },
+                _ => unimplemented!(),
+            },
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                              format!("{} Incomplete type started here", first.pos))),
+        }
+    }
+}
+
+fn parse_expression<I: Iterator<Item = Tag<Token>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>, type_allowed: bool)
+                                                    -> io::Result<(Option<Tag<Token>>, Result<Tag<Expression>, Tag<Type>>)> {
+    let mut next = None;
+    let mut base = match first.value {
+        Token::Label(first_name) => Tag::new(Label(first_name), first.pos.clone()),
+        Token::Int(i) => Tag::new(Int(i), first.pos.clone()),
+        Token::Long(l) => Tag::new(Long(l), first.pos.clone()),
+        Token::KeywordInt | Token::KeywordLong | Token::Const | Token::Volatile | Token::Void =>
+            if type_allowed {
+                return Ok(Err(try!(parse_type(first, tokens))));
+            } else {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                          format!("{} Unexpected variable declaration here, only expressions are allowed", first.pos)));
+            },
+        Token::Semicolon =>
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                      format!("{} Unexpected semicolon here, only expressions are allowed", first.pos))),
+        Token::OpenParen => {
+            let (n, paren) = try!(parse_paren(&first.pos.clone(), tokens));
+            next = Some(n);
+            paren
         },
-        Token::Int(i) => parse_possible_comma(first.with_value(Int(i)), tokens),
-        Token::Long(l) => parse_possible_comma(first.with_value(Long(l)), tokens),
-        Token::KeywordInt | Token::KeywordLong | Token::Const | Token::Volatile =>
-            Err(io::Error::new(io::ErrorKind::InvalidInput,
-                               format!("{} Unexpected variable declaration here, only expressions are allowed", first.pos))),
         v => unimplemented!("{:?}", v),
+    };
+
+    let mut next = next.unwrap_or_else(|| tokens.next());
+    println!("N: {:?}", next);
+    loop {
+        match next {
+            Some(nextu) => match nextu.value {
+                Token::OpenParen => {
+                    let (n, expression) = try!(parse_paren(&nextu.pos, tokens));
+                    next = n;
+                    base = Tag::new(Funcall(Box::new(base), expression.to_progn()), first.pos.clone());
+                },
+                Token::Semicolon | Token::CloseParen | Token::CloseCurly | Token::CloseSquare =>
+                    return Ok((Some(nextu), base)),
+                Token::Comma => {
+                    let (n, comma) = try!(parse_comma(base, &nextu.pos, tokens));
+                    next = n;
+                    base = comma;
+                },
+                Token::OpenSquare => {
+                    let (n, expr) = try!(parse_expression(try!(tokens.next().ok_or_else(
+                        || io::Error::new(io::ErrorKind::InvalidInput,
+                                          format!("{} Found EOF when expected `]` to close `[` here", nextu.pos)))), tokens));
+                    match n {
+                        Some(Tag { value: Token::CloseSquare, pos: _ }) => {
+                            next = tokens.next();
+                            base = Tag::new(Index(Box::new(base), Box::new(expr)), first.pos.clone())
+                        },
+                        Some(next) => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                format!("{} Expected a `]` here", next.pos))),
+                        None => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                          format!("{} Found EOF when expected `]` to close `[` here", nextu.pos))),
+                    }
+                },
+                Token::Set => {
+                    let (n, expr) = try!(parse_expression(try!(tokens.next().ok_or_else(
+                        || io::Error::new(io::ErrorKind::InvalidInput,
+                                          format!("{} Found EOF when expecting an expression after `=` here", nextu.pos)))), tokens));
+                    next = n;
+                    base = Tag::new(Set(Box::new(base), Box::new(expr)), first.pos.clone());
+                },
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                     format!("{} Unexpected symbol here, expected `(`, `)`, `;`, `}}`, `,`, `[`, `]`, or `=`", nextu.pos))),
+            },
+            None => return Ok((None, base)),
+        }
     }
 }
 
@@ -379,15 +642,15 @@ fn parse_comma<I: Iterator<Item = Tag<Token>>>(first: Tag<Expression>, comma_pos
     Ok((next, Tag::new(Progn(vec), first_pos)))
 }
 
-pub fn parse(tokens: Vec<Tag<Token>>) -> io::Result<Vec<Tag<Statement>>> {
-    let mut statements = Vec::new();
+pub fn parse(tokens: Vec<Tag<Token>>) -> io::Result<Vec<Tag<Declaration>>> {
+    let mut declarations = Vec::new();
     let mut tokens = PrefixIterator::new(tokens.into_iter().fuse());
     match tokens.next() {
         Some(token) => {
             let mut next = token;
             loop {
-                let (n, statement) = try!(parse_statement(next, &mut tokens));
-                statements.push(statement);
+                let (n, decl) = try!(parse_top_level(next, &mut tokens));
+                declarations.push(decl);
                 match n.or_else(|| tokens.next()) {
                     Some(n) => next = n,
                     None => break,
@@ -396,26 +659,79 @@ pub fn parse(tokens: Vec<Tag<Token>>) -> io::Result<Vec<Tag<Statement>>> {
         },
         None => (),
     }
-    Ok(statements)
+    Ok(declarations)
+}
+
+pub fn parse_command_line(tokens: Vec<Tag<Token>>) -> io::Result<Vec<Result<Tag<Declaration>, Tag<Statement>>>> {
+    let mut declarations = Vec::new();
+    let mut tokens = PrefixIterator::new(tokens.into_iter().fuse());
+    match tokens.next() {
+        Some(token) => {
+            let mut next = token;
+            loop {
+                let (n, either) = try!(parse_maybe_variable_declaration(next, &mut tokens));
+                declarations.push(either);
+                match n.or_else(|| tokens.next()) {
+                    Some(n) => next = n,
+                    None => break,
+                }
+            }
+        },
+        None => (),
+    }
+    Ok(declarations)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use std::error::Error;
+    use std::rc::Rc;
+
+    fn parse_statements(tokens: Vec<Tag<Token>>) -> io::Result<Vec<Tag<Statement>>> {
+        let mut statements = Vec::new();
+        let mut tokens = PrefixIterator::new(tokens.into_iter().fuse());
+        match tokens.next() {
+            Some(token) => {
+                let mut next = token;
+                loop {
+                    let (n, statement) = try!(parse_statement(next, &mut tokens));
+                    statements.push(statement);
+                    match n.or_else(|| tokens.next()) {
+                        Some(n) => next = n,
+                        None => break,
+                    }
+                }
+            },
+            None => (),
+        }
+        Ok(statements)
+    }
 
     fn pos(line: usize, column: usize) -> Pos {
         Pos::new(Rc::new("*stdin*".to_owned()), line, column)
     }
 
     #[test]
-    fn parse_expression() {
+    fn parse_funcall_1() {
         assert_eq!(
-            vec![Tag::new(Expression(Funcall("hi".to_owned(),
+            vec![Tag::new(Expression(Funcall(Box::new(Tag::new(Label("hi".to_owned()),
+                                                               pos(1, 0))),
                                              vec![Tag::new(Label("baby".to_owned()), pos(1, 3)),
                                                   Tag::new(Label("cakes".to_owned()), pos(1, 9))])),
                           pos(1, 0))],
-            parse(lex("*stdin*", "hi(baby, cakes);".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "hi(baby, cakes);".chars()).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn parse_funcall_2() {
+        assert_eq!(
+            vec![Tag::new(Expression(Funcall(Box::new(Tag::new(Label("hi".to_owned()),
+                                                               pos(1, 1))),
+                                             vec![Tag::new(Label("baby".to_owned()), pos(1, 3)),
+                                                  Tag::new(Label("cakes".to_owned()), pos(1, 9))])),
+                          pos(1, 0))],
+            parse_statements(lex("*stdin*", "(hi)(baby, cakes);".chars()).unwrap()).unwrap());
     }
 
     #[test]
@@ -425,17 +741,17 @@ mod test {
                              Box::new(Tag::new(Expression(Int(2)), pos(1, 7))),
                              None),
                           pos(1, 0))],
-            parse(lex("*stdin*", "if (1) 2;".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "if (1) 2;".chars()).unwrap()).unwrap());
     }
 
     #[test]
     fn parse_if_no_brace_no_semicolon_panic() {
-        let err = parse(lex("*stdin*", "if (1) 2 else 3;".chars()).unwrap()).unwrap_err();
+        let err = parse_statements(lex("*stdin*", "if (1) 2 else 3;".chars()).unwrap()).unwrap_err();
         assert_eq!(
             io::ErrorKind::InvalidInput,
             err.kind());
         assert_eq!(
-            "*stdin*:1:9: Expected semicolon here",
+            "*stdin*:1:9: Unexpected symbol here, expected `(`, `)`, `;`, `}`, `,`, `[`, `]`, or `=`",
             err.description());
     }
 
@@ -446,7 +762,7 @@ mod test {
                              Box::new(Tag::new(Expression(Int(2)), pos(1, 7))),
                              Some(Box::new(Tag::new(Expression(Int(3)), pos(1, 15))))),
                           pos(1, 0))],
-            parse(lex("*stdin*", "if (1) 2; else 3;".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "if (1) 2; else 3;".chars()).unwrap()).unwrap());
     }
 
     #[test]
@@ -465,12 +781,12 @@ mod test {
                              Box::new(Tag::new(Expression(Void), pos(1, 5))),
                              Some(Box::new(Tag::new(Expression(Void), pos(1, 10))))),
                           pos(1, 0))],
-            parse(lex("*stdin*", "if(1);else;".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "if(1);else;".chars()).unwrap()).unwrap());
     }
 
     #[test]
     fn parse_if_eof_panic() {
-        let err = parse(lex("*stdin*", "if;".chars()).unwrap()).unwrap_err();
+        let err = parse_statements(lex("*stdin*", "if;".chars()).unwrap()).unwrap_err();
         assert_eq!(
             io::ErrorKind::InvalidInput,
             err.kind());
@@ -492,7 +808,7 @@ mod test {
                              }), pos(1, 7))),
                              None),
                           pos(1, 0))],
-            parse(lex("*stdin*", "if (1) { 2, 3; 4; }".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "if (1) { 2, 3; 4; }".chars()).unwrap()).unwrap());
     }
 
     #[test]
@@ -507,7 +823,7 @@ mod test {
                                                      Tag::new(Expression(Int(3)), pos(1, 18))]
                                 }), pos(1, 10)))), pos(1, 0)),
                  Tag::new(Expression(Int(4)), pos(1, 23))],
-            parse(lex("*stdin*", "while (1) { 1, 2; 3; } 4;".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "while (1) { 1, 2; 3; } 4;".chars()).unwrap()).unwrap());
     }
 
     #[test]
@@ -517,7 +833,7 @@ mod test {
                 declarations: Vec::new(),
                 statements: Vec::new()
             }), pos(1, 0))],
-            parse(lex("*stdin*", "{}".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "{}".chars()).unwrap()).unwrap());
     }
 
     #[test]
@@ -526,12 +842,12 @@ mod test {
             vec![Tag::new(Expression(Progn(vec![Tag::new(Int(1), pos(1, 0)),
                                                 Tag::new(Int(2), pos(1, 3))])),
                           pos(1, 0))],
-            parse(lex("*stdin*", "1, 2;".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "1, 2;".chars()).unwrap()).unwrap());
     }
 
     #[test]
     fn parse_label_semicolon_required_panic() {
-        let err = parse(lex("*stdin*", "hi".chars()).unwrap()).unwrap_err();
+        let err = parse_statements(lex("*stdin*", "hi".chars()).unwrap()).unwrap_err();
         assert_eq!(
             io::ErrorKind::InvalidInput,
             err.kind());
@@ -568,7 +884,7 @@ mod test {
                         }), pos(2, 7))),
                              Some(Box::new(Tag::new(Expression(Int(4)), pos(11, 4))))),
             pos(2, 0))],
-            parse(lex("*stdin*", "
+            parse_statements(lex("*stdin*", "
 if (1) {
     while (2) {
         if (3) {
@@ -583,7 +899,7 @@ if (1) {
 
     #[test]
     fn parse_no_semicolon_after_else_panic() {
-        let err = parse(lex("*stdin*",
+        let err = parse_statements(lex("*stdin*",
         "{
     if (1) {
         2;
@@ -600,7 +916,7 @@ if (1) {
 
     #[test]
     fn parse_variable_decl_panic() {
-        let err = parse(lex("*stdin*", "{ int i }".chars()).unwrap()).unwrap_err();
+        let err = parse_statements(lex("*stdin*", "{ int i }".chars()).unwrap()).unwrap_err();
         assert_eq!(
             io::ErrorKind::InvalidInput,
             err.kind());
@@ -614,38 +930,210 @@ if (1) {
         assert_eq!(
             vec![Tag::new(Block(Block {
                 declarations: vec![Tag::new(Declaration {
-                    type_: Type {
-                        name: Tag::new(TypeName::Int, pos(1, 2)),
+                    type_: Tag::new(Type {
+                        name: TypeName::Int,
                         is_const: false,
                         is_volatile: false,
-                    },
+                    }, pos(1, 2)),
                     name: Tag::new("i".to_owned(), pos(1, 6)),
                     value: None,
                 }, pos(1, 2))],
                 statements: Vec::new(),
             }), pos(1, 0))],
-            parse(lex("*stdin*", "{ int i; }".chars()).unwrap()).unwrap());
+            parse_statements(lex("*stdin*", "{ int i; }".chars()).unwrap()).unwrap());
     }
 
     #[test]
     fn parse_variable_decl_in_parens_panic() {
-        let err = parse(lex("*stdin*", "(type i)".chars()).unwrap()).unwrap_err();
+        let err = parse_statements(lex("*stdin*", "(type i)".chars()).unwrap()).unwrap_err();
         assert_eq!(
             io::ErrorKind::InvalidInput,
             err.kind());
         assert_eq!(
-            "*stdin*:1:1: Unexpected variable declaration here, only expressions are allowed",
+            "*stdin*:1:6: Unexpected symbol here, expected `(`, `)`, `;`, `}`, `,`, `[`, `]`, or `=`",
             err.description());
     }
 
     #[test]
     fn parse_variable_decl_in_parens_panic_2() {
-        let err = parse(lex("*stdin*", "(int i)".chars()).unwrap()).unwrap_err();
+        let err = parse_statements(lex("*stdin*", "(int i)".chars()).unwrap()).unwrap_err();
         assert_eq!(
             io::ErrorKind::InvalidInput,
             err.kind());
         assert_eq!(
             "*stdin*:1:1: Unexpected variable declaration here, only expressions are allowed",
             err.description());
+    }
+
+    #[test]
+    fn parse_semicolon_in_paren_panic() {
+        let err = parse_statements(lex("*stdin*", "(;)".chars()).unwrap()).unwrap_err();
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            err.kind());
+        assert_eq!(
+            "*stdin*:1:1: Unexpected semicolon here, only expressions are allowed",
+            err.description());
+    }
+
+    #[test]
+    fn parse_index_label_label() {
+        assert_eq!(
+            vec![Tag::new(Expression(Index(Box::new(Tag::new(Label("a".to_owned()), pos(1, 0))), Box::new(Tag::new(Label("b".to_owned()), pos(1, 2))))), pos(1, 0))],
+            parse_statements(lex("*stdin*", "a[b];".chars()).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn parse_close_paren_panic() {
+        let err = parse_statements(lex("*stdin*", ")".chars()).unwrap()).unwrap_err();
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            err.kind());
+        assert_eq!(
+            "*stdin*:1:0: Invalid start of a statement",
+            err.description());
+    }
+
+    #[test]
+    fn parse_close_square_panic() {
+        let err = parse_statements(lex("*stdin*", "]".chars()).unwrap()).unwrap_err();
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            err.kind());
+        assert_eq!(
+            "*stdin*:1:0: Invalid start of a statement",
+            err.description());
+    }
+
+    #[test]
+    fn parse_close_curly_panic() {
+        let err = parse_statements(lex("*stdin*", "}".chars()).unwrap()).unwrap_err();
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            err.kind());
+        assert_eq!(
+            "*stdin*:1:0: Invalid start of a statement",
+            err.description());
+    }
+
+    #[test]
+    fn parse_declare_set_variable() {
+        assert_eq!(
+            vec![Tag::new(Declaration {
+                type_: Tag::new(Type {
+                    name: TypeName::Int,
+                    is_const: false,
+                    is_volatile: false,
+                }, pos(1, 0)),
+                name: Tag::new("i".to_owned(), pos(1, 4)),
+                value: Some(Tag::new(Int(3), pos(1, 8))),
+            }, pos(1, 0))],
+            parse(lex("*stdin*", "int i = 3;".chars()).unwrap()).unwrap());
+    }
+
+
+    #[test]
+    fn parse_set_variable() {
+        assert_eq!(
+            vec![Ok(Tag::new(Declaration {
+                type_: Tag::new(Type {
+                    name: TypeName::Int,
+                    is_const: false,
+                    is_volatile: false,
+                }, pos(1, 0)),
+                name: Tag::new("i".to_owned(), pos(1, 4)),
+                value: None,
+            }, pos(1, 0))),
+                 Err(Tag::new(Expression(Set(Box::new(Tag::new(Label("i".to_owned()),
+                                                               pos(1, 7))),
+                                             Box::new(Tag::new(Int(3),
+                                                               pos(1, 11))))),
+                              pos(1, 7))),
+                 Err(Tag::new(If(Tag::new(Label("i".to_string()), pos(1, 18)),
+                                 Box::new(Tag::new(Block(Block {
+                                     declarations: vec![],
+                                     statements: vec![
+                                         Tag::new(
+                                             Expression(Set(Box::new(Tag::new(Label("i".to_owned()),
+                                                                              pos(1, 25))),
+                                                            Box::new(Tag::new(Int(5),
+                                                                              pos(1, 31))))),
+                                             pos(1, 24)),
+                                     ],
+                                 }), pos(1, 21))),
+                                 None),
+                              pos(1, 14)))],
+            parse_command_line(lex("*stdin*", "int i; i = 3; if (i) { ((i) = (5)); }".chars()).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn parse_top_level_statement_1_panic() {
+        let err = parse(lex("*stdin*", "{
+    if (1) {
+        2;
+    } else
+        3;
+}".chars()).unwrap()).unwrap_err();
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            err.kind());
+        assert_eq!(
+            "*stdin*:1:0: Only declarations are allowed at the top level",
+            err.description());
+    }
+
+    #[test]
+    fn parse_top_level_statement_2_panic() {
+        let err = parse(lex("*stdin*", "3;".chars()).unwrap()).unwrap_err();
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            err.kind());
+        assert_eq!(
+            "*stdin*:1:0: Only declarations are allowed at the top level",
+            err.description());
+    }
+
+    #[test]
+    fn parse_array() {
+        assert_eq!(
+            vec![Ok(Tag::new(Declaration {
+                type_: Tag::new(
+                    Type {
+                        name: TypeName::Array(Box::new(TypeName::Int),
+                                              Some(Tag::new(Int(3),
+                                                            pos(1, 6)))),
+                        is_const: false,
+                        is_volatile: false,
+                    }, pos(1, 0)),
+                name: Tag::new("i".to_owned(), pos(1, 4)),
+                value: None, },
+                          pos(1, 0)))],
+            parse_command_line(lex("*stdin*", "int i[3];".chars()).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn parse_cast_void_int() {
+        assert_eq!(
+            vec![Err(Tag::new(Expression(Cast(Box::new(Tag::new(Type { name: TypeName::Void,
+                                                                       is_const: false,
+                                                                       is_volatile: false, },
+                                                                pos(1, 1))),
+                                              Box::new(Tag::new(Int(0),
+                                                                pos(1, 7))))),
+                              pos(1, 0)))],
+            parse_command_line(lex("*stdin*", "(void) 0;".chars()).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn parse_cast_long_int() {
+        assert_eq!(
+            vec![Err(Tag::new(Expression(Cast(Box::new(Tag::new(Type { name: TypeName::Long,
+                                                                       is_const: false,
+                                                                       is_volatile: false, },
+                                                                pos(1, 1))),
+                                              Box::new(Tag::new(Int(0),
+                                                                pos(1, 7))))),
+                              pos(1, 0)))],
+            parse_command_line(lex("*stdin*", "(long) 0;".chars()).unwrap()).unwrap());
     }
 }

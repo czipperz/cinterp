@@ -1,7 +1,8 @@
 use std::io;
 use std::os::raw::*;
-use pos::*;
 use std::rc::Rc;
+use pos::*;
+use preprocess::*;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
@@ -15,6 +16,7 @@ pub enum Token {
     Long(c_long),
     KeywordInt,
     KeywordLong,
+    Void,
     Semicolon,
     OpenParen,
     CloseParen,
@@ -23,6 +25,7 @@ pub enum Token {
     OpenCurly,
     CloseCurly,
     Comma,
+    Set,
 }
 use self::Token::*;
 
@@ -49,59 +52,59 @@ fn wrap_label(s: String) -> Token {
         Token::Const
     } else if s == "volatile" {
         Token::Volatile
+    } else if s == "void" {
+        Token::Void
     } else {
         Token::Label(s)
     }
 }
 
-pub fn lex<I: Iterator<Item = char>>(file: &str, iter: I) -> io::Result<Vec<Tag<Token>>> {
+pub fn lex<I: Iterator<Item = char>>(file_name: &str, iter: I) -> io::Result<Vec<Tag<Token>>> {
     let mut tokens = Vec::new();
-    let mut iter = iter.fuse();
-    let file = Rc::new(file.to_owned());
-    let mut pos = Pos::new(file.clone(), 1, 0);
+    let mut iter = PreprocessorIterator::new(file_name, iter.fuse());
     let mut ch = match iter.next() {
         Some(ch) => ch,
         None => return Ok(tokens),
     };
     'outer: loop {
-        if ch.is_whitespace() {
-        } else if ch == ';' {
-            tokens.push(Tag::new(Semicolon, pos.clone()));
-        } else if ch == ',' {
-            tokens.push(Tag::new(Comma, pos.clone()));
-        } else if ch == '(' {
-            tokens.push(Tag::new(OpenParen, pos.clone()));
-        } else if ch == ')' {
-            tokens.push(Tag::new(CloseParen, pos.clone()));
-        } else if ch == '[' {
-            tokens.push(Tag::new(OpenSquare, pos.clone()));
-        } else if ch == ']' {
-            tokens.push(Tag::new(CloseSquare, pos.clone()));
-        } else if ch == '{' {
-            tokens.push(Tag::new(OpenCurly, pos.clone()));
-        } else if ch == '}' {
-            tokens.push(Tag::new(CloseCurly, pos.clone()));
-        } else if ch.is_digit(10) {
-            let mut res: c_long = ch.to_digit(10).unwrap() as c_long;
-            let start_pos = pos.clone();
-            pos.advance(ch);
+        if ch.value.is_whitespace() {
+        } else if ch.value == ';' {
+            tokens.push(Tag::new(Semicolon, ch.pos));
+        } else if ch.value == ',' {
+            tokens.push(Tag::new(Comma, ch.pos));
+        } else if ch.value == '=' {
+            tokens.push(Tag::new(Set, ch.pos));
+        } else if ch.value == '(' {
+            tokens.push(Tag::new(OpenParen, ch.pos));
+        } else if ch.value == ')' {
+            tokens.push(Tag::new(CloseParen, ch.pos));
+        } else if ch.value == '[' {
+            tokens.push(Tag::new(OpenSquare, ch.pos));
+        } else if ch.value == ']' {
+            tokens.push(Tag::new(CloseSquare, ch.pos));
+        } else if ch.value == '{' {
+            tokens.push(Tag::new(OpenCurly, ch.pos));
+        } else if ch.value == '}' {
+            tokens.push(Tag::new(CloseCurly, ch.pos));
+        } else if ch.value.is_digit(10) {
+            let mut res: c_long = ch.value.to_digit(10).unwrap() as c_long;
+            let start_pos = ch.pos;
             let mut c = iter.next();
             loop {
                 match c {
                     Some(cc) => {
-                        if cc.is_digit(10) {
+                        if cc.value.is_digit(10) {
                             res *= 10;
-                            res += cc.to_digit(10).unwrap() as c_long;
-                            pos.advance(cc);
+                            res += cc.value.to_digit(10).unwrap() as c_long;
                             c = iter.next();
-                        } else if cc.is_whitespace() || cc == ')' || cc == ',' ||
-                            cc == '[' || cc == ']' || cc == '{' || cc == '}' || cc == ';' {
+                        } else if cc.value.is_whitespace() || cc.value == ')' || cc.value == ',' ||
+                            cc.value == '[' || cc.value == ']' || cc.value == '{' || cc.value == '}' || cc.value == ';' {
                             ch = cc;
                             tokens.push(Tag::new(narrow_number(res), start_pos));
                             continue 'outer;
                         } else {
                             return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                                      format!("{} Invalid end of number `{}`", pos, cc)));
+                                                      format!("{} Invalid end of number `{}`", cc.pos, cc.value)));
                         }
                     },
                     None => {
@@ -110,34 +113,31 @@ pub fn lex<I: Iterator<Item = char>>(file: &str, iter: I) -> io::Result<Vec<Tag<
                     },
                 }
             }
-        } else if ch.is_alphabetic() {
+        } else if ch.value.is_alphabetic() || ch.value == '_' {
             let mut label = String::new();
-            label.push(ch);
-            let start_pos = pos.clone();
-            pos.advance(ch);
+            label.push(ch.value);
+            let start_pos = ch.pos;
             let mut c = iter.next();
             while let Some(cc) = c {
-                if cc.is_alphanumeric() {
-                    label.push(cc);
-                    pos.advance(cc);
+                if cc.value.is_alphanumeric() || cc.value == '_' {
+                    label.push(cc.value);
                     c = iter.next();
-                } else if cc.is_whitespace() || cc == '(' || cc == ')' || cc == ',' ||
-                    cc == '[' || cc == ']' || cc == '{' || cc == '}' || cc == ';' {
+                } else if cc.value.is_whitespace() || cc.value == '(' || cc.value == ')' || cc.value == ',' ||
+                    cc.value == '[' || cc.value == ']' || cc.value == '{' || cc.value == '}' || cc.value == ';' {
                     ch = cc;
                     tokens.push(Tag::new(wrap_label(label), start_pos));
                     continue 'outer;
                 } else {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                              format!("{} Invalid end of label `{}`", pos, cc)));
+                                              format!("{} Invalid end of label `{}`", cc.pos, cc.value)));
                 }
             }
             tokens.push(Tag::new(wrap_label(label), start_pos));
         } else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                      format!("{} Invalid character `{}`", pos, ch)));
+                                      format!("{} Invalid character `{}`", ch.pos, ch.value)));
         }
 
-        pos.advance(ch);
         ch = match iter.next() {
             Some(ch) => ch,
             None => return Ok(tokens),
@@ -167,10 +167,17 @@ mod test {
     }
 
     #[test]
-    fn lex_label() {
+    fn lex_label_1() {
         assert_eq!(
             vec![Tag::new(Label("aoeu".to_owned()), pos(1, 0))],
             lex("*stdin*", "aoeu".chars()).unwrap());
+    }
+
+    #[test]
+    fn lex_label_2() {
+        assert_eq!(
+            vec![Tag::new(Label("a_test_caseForYourMomma".to_owned()), pos(1, 0))],
+            lex("*stdin*", "a_test_caseForYourMomma".chars()).unwrap());
     }
 
     #[test]
