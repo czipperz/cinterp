@@ -13,6 +13,14 @@ use std::error::Error;
 use lex::*;
 use parse::*;
 use type_check::*;
+use pos::*;
+
+fn exec(input: &String) -> io::Result<Vec<Tag<Declaration>>> {
+    let tokens = Lexer::new("*stdin*", input.chars());
+    let syntax_tree = try!(parse(tokens));
+    try!(type_check(syntax_tree.iter()));
+    Ok(syntax_tree)
+}
 
 fn main() {
     let mut input = String::new();
@@ -24,9 +32,19 @@ fn main() {
         if input == ":exit\n" {
             return;
         }
-        match lex("*stdin*", input.chars()).and_then(parse)
-            .and_then(|bst| type_check(bst.iter()).map(|()| bst)) {
-            Ok(bst) => println!("{:?}", bst),
+        match exec(&input) {
+            Ok(syntax_trees) => {
+                let mut first = true;
+                for syntax_tree in syntax_trees {
+                    if first {
+                        first = false;
+                    } else {
+                        print!(" ");
+                    }
+                    print!("{}", syntax_tree.value);
+                }
+                println!("");
+            },
             Err(e) => println!("{}", e.description()),
         }
     }
