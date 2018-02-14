@@ -1,98 +1,218 @@
-use std::rc::Rc;
 use pos::*;
-use prefix::*;
-use std::iter::Fuse;
+use lex::*;
 use std::io;
-
-struct Tagged<I: Iterator<Item = char>> {
-    pos: Pos,
-    iter: Fuse<I>,
-}
-
-impl<I: Iterator<Item = char>> Tagged<I> {
-    fn new(file_name: &str, iter: Fuse<I>) -> Self {
-        Tagged { pos: Pos::new(Rc::new(file_name.to_owned()), 1, 0), iter }
-    }
-}
-
-impl<I: Iterator<Item = char>> Iterator for Tagged<I> {
-    type Item = Tag<char>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(c) => {
-                let pos = self.pos.clone();
-                self.pos.advance(c);
-                Some(Tag::new(c, pos))
-            },
-            None => None,
-        }
-    }
-}
+use std::collections::HashMap;
+use Token::*;
 
 pub struct Preprocessor<I: Iterator<Item = char>> {
-    iter: PrefixIterator<Tagged<I>>,
-    //files: Vec<PrefixIterator<PosIterator<ReaderIterator>>>,
+    //files: Vec<Lexer<ReaderIterator>>,
+    definitions: HashMap<String, Vec<Tag<Token>>>,
+    main_lexer: Lexer<I>,
+    if_macros: usize,
 }
 
 impl<I: Iterator<Item = char>> Preprocessor<I> {
-    pub fn new(file_name: &str, iter: Fuse<I>) -> Self {
+    pub fn new(main_lexer: Lexer<I>) -> Self {
         Preprocessor {
-            iter: PrefixIterator::new(Tagged::new(file_name, iter)),
+            definitions: HashMap::new(),
+            main_lexer,
+            if_macros: 0,
+        }
+    }
+
+    fn skip_over_macros_until_else(&mut self) -> Option<io::Result<Tag<Vec<Tag<Token>>>>> {
+        let mut if_macros = 0;
+        loop {
+            match self.main_lexer.next() {
+                Some(Ok(token)) => {
+                    match token.value {
+                        Macro(vec) => {
+                            {
+                                let macro_name = match vec.get(0) {
+                                    Some(macro_name) => macro_name,
+                                    None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                           format!("{} `#` with no macro here", token.pos)))),
+                                };
+                                match macro_name.value {
+                                    Label(ref l) =>
+                                        if l == "endif" {
+                                            if if_macros != 0 {
+                                                if_macros -= 1;
+                                                continue;
+                                            }
+                                        } else if l == "else" {
+                                            if if_macros != 0 {
+                                                continue;
+                                            }
+                                        } else if l == "ifdef" {
+                                            if_macros += 1;
+                                            continue;
+                                        } else {
+                                            continue;
+                                        },
+                                    _ => continue,
+                                }
+                            }
+                            return Some(Ok(Tag::new(vec, token.pos)));
+                        },
+                        _ => (),
+                    }
+                },
+                Some(Err(e)) => return Some(Err(e)),
+                None => return None,
+            }
         }
     }
 }
 
 impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
-    type Item = io::Result<Tag<char>>;
+    type Item = io::Result<Tag<Token>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.iter.next() {
-            Some(c) => {
-                if c.value == '\\' {
-                    match self.iter.next() {
-                        Some(escaped) => {
-                            if escaped.value == '\n' {
-                                self.iter.next().map(Ok)
-                            } else {
-                                self.iter.push(escaped);
-                                Some(Ok(c))
-                            }
-                        },
-                        None => {
-                            Some(Ok(c))
-                        }
-                    }
-                } else if c.value == '/' {
-                    match self.iter.next() {
-                        Some(Tag { value: '*', pos: _ }) => {
-                            let mut next = self.iter.next();
-                            loop {
-                                match next {
-                                    Some(Tag { value: '*', pos: _ }) => {
-                                        match self.iter.next() {
-                                            Some(Tag { value: '/', pos: _ }) => return Some(Ok(Tag::new(' ', c.pos))),
-                                            Some(c) => next = Some(c),
-                                            None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                                                                   format!("{} Found EOF when expected end of comment started here", c.pos)))),
-                                        }
-                                    },
-                                    Some(_) => next = self.iter.next(),
+        match self.main_lexer.next() {
+            Some(Ok(token)) => match token.value {
+                Macro(vec) => {
+                    let mut vec_iter = vec.into_iter();
+                    let macro_name = match vec_iter.next() {
+                        Some(macro_name) => macro_name,
+                        None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                               format!("{} `#` with no macro here", token.pos)))),
+                    };
+                    match macro_name.value {
+                        Label(ref l) =>
+                            if l == "define" {
+                                let name = match vec_iter.next() {
+                                    Some(name) => name,
                                     None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
-                                                                           format!("{} Found EOF when expected end of comment started here", c.pos)))),
+                                                                           format!("{} What are you going to define?", macro_name.pos)))),
+                                };
+                                let name = match name.value {
+                                    Label(name) => name,
+                                    _ => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                        format!("{} Invalid definition name here", name.pos)))),
+                                };
+                                let value = vec_iter.collect();
+                                self.definitions.insert(name, value);
+                                self.next()
+                            } else if l == "undef" {
+                                let name = match vec_iter.next() {
+                                    Some(name) => name,
+                                    None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                           format!("{} What are you going to define?", macro_name.pos)))),
+                                };
+                                let name = match name.value {
+                                    Label(name) => name,
+                                    _ => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                        format!("{} Invalid definition name here", name.pos)))),
+                                };
+                                self.definitions.remove(&name);
+                                self.next()
+                            } else if l == "ifdef" || l == "ifndef" {
+                                let name = match vec_iter.next() {
+                                    Some(name) => name,
+                                    None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                        format!("{} Found EOF when expected a macro name after #ifdef here", macro_name.pos)))),
+                                };
+                                let truth = if l == "ifdef" {
+                                    let name = match name.value {
+                                        Label(name) => name,
+                                        _ => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                            format!("{} Invalid macro name here", name.pos)))),
+                                    };
+                                    self.definitions.contains_key(&name)
+                                } else if l == "ifndef" {
+                                    let name = match name.value {
+                                        Label(name) => name,
+                                        _ => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                            format!("{} Invalid macro name here", name.pos)))),
+                                    };
+                                    !self.definitions.contains_key(&name)
+                                } else {
+                                    unreachable!()
+                                };
+                                self.if_macros += 1;
+                                if truth {
+                                    self.next()
+                                } else {
+                                    match self.skip_over_macros_until_else() {
+                                        Some(Ok(next)) => {
+                                            if (match next.value.get(0) {
+                                                Some(&Tag { value: Label(ref l), pos: _ }) => {
+                                                    if l == "endif" {
+                                                        true
+                                                    } else if l == "else" {
+                                                        false
+                                                    } else {
+                                                        unreachable!()
+                                                    }
+                                                },
+                                                Some(_) => unimplemented!(),
+                                                None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                                       format!("{} Found EOF when expected a macro name after # here", next.pos)))),
+                                            }) {
+                                                self.main_lexer.push(Tag::new(Macro(next.value), next.pos));
+                                            }
+                                            self.next()
+                                        },
+                                        Some(Err(e)) => Some(Err(e)),
+                                        None => Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                        format!("{} No #endif to close #ifdef here", macro_name.pos)))),
+                                    }
                                 }
-                            }
-                        },
-                        Some(n) => {
-                            self.iter.push(n);
-                            Some(Ok(c))
-                        },
-                        None => None
+                            } else if l == "else" {
+                                // skip over body until endif
+                                match self.skip_over_macros_until_else() {
+                                    Some(Ok(next)) => {
+                                        self.main_lexer.push(Tag::new(Macro(next.value), next.pos));
+                                        self.next()
+                                    },
+                                    Some(Err(e)) => Some(Err(e)),
+                                    None => Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                    format!("{} No close to #else here", macro_name.pos)))),
+                                }
+                            } else if l == "endif" {
+                                if self.if_macros == 0 {
+                                    return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                                   format!("{} No #if to end here", macro_name.pos))))
+                                }
+                                self.if_macros -= 1;
+                                self.next()
+                            } else {
+                                panic!()
+                            },
+                        x => panic!("{:?}", x)
                     }
-                } else {
-                    Some(Ok(c))
-                }
+                },
+                Label(s) => {
+                    Some(Ok(Tag::new(
+                        if self.definitions.contains_key(&s) {
+                            for token in self.definitions.get(&s).as_ref().unwrap().iter().rev() {
+                                self.main_lexer.push(token.clone());
+                            }
+                            return self.next()
+                        } else if s == "if" {
+                            If
+                        } else if s == "else" {
+                            Else
+                        } else if s == "while" {
+                            While
+                        } else if s == "int" {
+                            KeywordInt
+                        } else if s == "long" {
+                            KeywordLong
+                        } else if s == "const" {
+                            Const
+                        } else if s == "volatile" {
+                            Volatile
+                        } else if s == "void" {
+                            Void
+                        } else {
+                            Label(s)
+                        }, token.pos)))
+                },
+                _ => Some(Ok(token)),
             },
+            Some(Err(e)) => Some(Err(e)),
             None => None,
         }
     }
@@ -101,53 +221,138 @@ impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use Token::*;
+    use std::rc::Rc;
 
-    fn preprocess(s: &str) -> io::Result<Vec<Tag<char>>> {
-        Preprocessor::new("*stdin*", s.chars().fuse()).collect()
+    fn preprocess(s: &str) -> io::Result<Vec<Tag<Token>>> {
+        Preprocessor::new(Lexer::new("*stdin*", s.chars())).collect()
     }
 
-    fn pos(line: usize, column: usize) -> Pos {
-        Pos::new(Rc::new("*stdin*".to_owned()), line, column)
-    }
-
-    #[test]
-    fn preprocess_backslash_newline() {
-        assert_eq!(vec![Tag::new('h', pos(1, 0)),
-                        Tag::new('e', pos(1, 1)),
-                        Tag::new('l', pos(2, 0)),
-                        Tag::new('l', pos(2, 1)),
-                        Tag::new('o', pos(2, 2))],
-                   preprocess("he\\\nllo").unwrap());
+    fn pos(y: usize, x: usize) -> Pos {
+        Pos::new(Rc::new("*stdin*".to_owned()), y, x)
     }
 
     #[test]
-    fn preprocess_delete_block_comment() {
-        assert_eq!(vec![Tag::new('h', pos(1, 0)),
-                        Tag::new(' ', pos(1, 1)),
-                        Tag::new('e', pos(1, 13))],
-                   preprocess("h/*ello lov*/e").unwrap());
+    fn preprocess_no_macros() {
+        assert_eq!(
+            vec![Tag::new(KeywordInt, pos(1, 0)),
+                 Tag::new(Label("i".to_owned()), pos(1, 4)),
+                 Tag::new(Label("is".to_owned()), pos(2, 0)),
+                 Tag::new(Label("babe".to_owned()), pos(3, 0))],
+            preprocess("int i
+is
+babe").unwrap());
     }
 
     #[test]
-    fn preprocess_delete_multiline_block_comment() {
-        assert_eq!(vec![Tag::new('h', pos(1, 0)),
-                        Tag::new(' ', pos(1, 1)),
-                        Tag::new('e', pos(3, 10))],
-                   preprocess("h/*ao  nteuheou\nao hte  nu\toehun\noh\tenueo*/e").unwrap());
+    fn preprocess_define_as_int_1() {
+        assert_eq!(
+            vec![Tag::new(KeywordInt, pos(2, 0)),
+                 Tag::new(Label("i".to_owned()), pos(2, 4)),
+                 Tag::new(Set, pos(2, 6)),
+                 Tag::new(Int(1), pos(1, 14)),
+                 Tag::new(Semicolon, pos(2, 13))],
+            preprocess("#define VALUE 1
+int i = VALUE;").unwrap());
     }
 
     #[test]
-    fn preprocess_dont_delete_line_comment() {
-        assert_eq!(vec![Tag::new('h', pos(1, 0)),
-                        Tag::new('/', pos(1, 1)),
-                        Tag::new('/', pos(1, 2)),
-                        Tag::new('c', pos(1, 3))],
-                   preprocess("h//c").unwrap());
+    fn preprocess_define_as_int_2() {
+        assert_eq!(
+            vec![Tag::new(KeywordInt, pos(2, 0)),
+                 Tag::new(Label("i".to_owned()), pos(2, 4)),
+                 Tag::new(Set, pos(1, 13)),
+                 Tag::new(Int(1), pos(1, 15)),
+                 Tag::new(Semicolon, pos(1, 16))],
+            preprocess("#define EQ_1 = 1;
+int i EQ_1").unwrap());
     }
 
     #[test]
-    fn preprocess_unclosed_line_comment() {
-        assert_eq!("*stdin*:1:12: Found EOF when expected end of comment started here",
-                   format!("{}", preprocess("hello world /*/").unwrap_err()));
+    fn preprocess_ifdef_else_defined() {
+        assert_eq!(
+            vec![Tag::new(Int(123), pos(3, 0))],
+            preprocess("#define VALUE
+#ifdef VALUE
+123
+#else
+456
+#endif").unwrap());
+    }
+
+    #[test]
+    fn preprocess_ifdef_else_not_defined() {
+        assert_eq!(
+            vec![Tag::new(Int(456), pos(4, 0))],
+            preprocess("#ifdef VALUE
+123
+#else
+456
+#endif").unwrap());
+    }
+
+    #[test]
+    fn preprocess_ifdef_not_defined() {
+        assert_eq!(
+            vec![Tag::new(Int(1), pos(1, 0)),
+                 Tag::new(Int(3), pos(5, 0))],
+            preprocess("1
+#ifdef VALUE
+2
+#endif
+3").unwrap());
+    }
+
+    #[test]
+    fn preprocess_ifdef_defined() {
+        assert_eq!(
+            vec![Tag::new(Int(1), pos(2, 0)),
+                 Tag::new(Int(2), pos(4, 0)),
+                 Tag::new(Int(3), pos(6, 0))],
+            preprocess("#define VALUE AOOSEUHT 1230123
+1
+#ifdef VALUE
+2
+#endif
+3").unwrap());
+    }
+
+    #[test]
+    fn preprocess_ifdef_not_macro_name_panic() {
+        assert_eq!(
+            "*stdin*:2:7: Invalid macro name here",
+            format!("{}", preprocess("1
+#ifdef 123
+2
+#endif
+3").unwrap_err()));
+    }
+
+    #[test]
+    fn preprocess_ifndef_then_define() {
+        assert_eq!(
+            vec![Tag::new(If, pos(2, 14))],
+            preprocess("#ifndef Value
+#define Value if
+#endif
+Value").unwrap());
+    }
+
+    #[test]
+    fn preprocess_define_then_redefine_component() {
+        assert_eq!(
+            vec![Tag::new(Label("f".to_owned()), pos(2, 10)),
+                 Tag::new(OpenParen, pos(2, 11)),
+                 Tag::new(Int(1), pos(1, 15)),
+                 Tag::new(CloseParen, pos(2, 18)),
+                 Tag::new(Label("f".to_owned()), pos(2, 10)),
+                 Tag::new(OpenParen, pos(2, 11)),
+                 Tag::new(Int(2), pos(4, 15)),
+                 Tag::new(CloseParen, pos(2, 18))],
+            preprocess("#define Intern 1
+#define V f(Intern)
+V
+#define Intern 2
+V").unwrap());
     }
 }

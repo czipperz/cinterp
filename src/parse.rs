@@ -859,17 +859,18 @@ mod test {
     use super::*;
     use std::error::Error;
     use std::rc::Rc;
+    use preprocess::*;
 
     fn parse(s: &str) -> io::Result<Vec<Tag<Declaration>>> {
-        super::parse(Lexer::new("*stdin*", s.chars()))
+        super::parse(Preprocessor::new(Lexer::new("*stdin*", s.chars())))
     }
 
     fn parse_command_line(s: &str) -> io::Result<Vec<Result<Tag<Declaration>, Tag<Statement>>>> {
-        super::parse_command_line(Lexer::new("*stdin*", s.chars()))
+        super::parse_command_line(Preprocessor::new(Lexer::new("*stdin*", s.chars())))
     }
 
     fn parse_statements(s: &str) -> io::Result<Vec<Tag<Statement>>> {
-        let tokens = Lexer::new("*stdin*", s.chars());
+        let tokens = Preprocessor::new(Lexer::new("*stdin*", s.chars()));
         let mut statements = Vec::new();
         let mut tokens = PrefixIterator::new(tokens.into_iter().fuse());
         match try!(to_result(tokens.next())) {

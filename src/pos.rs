@@ -21,6 +21,10 @@ impl Pos {
             self.column += 1;
         }
     }
+
+    pub fn same_line(&self, other: &Self) -> bool {
+        self.line == other.line
+    }
 }
 
 impl fmt::Debug for Pos {

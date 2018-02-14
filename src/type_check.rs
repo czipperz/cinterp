@@ -246,9 +246,10 @@ pub fn type_check<'a, I: Iterator<Item = &'a Tag<Declaration>>>(mut iter: I) -> 
 mod test {
     use super::*;
     use lex::*;
+    use preprocess::*;
 
     fn x(input: &str) -> io::Result<()> {
-        type_check(parse(Lexer::new("*stdin*", input.chars())).unwrap().iter())
+        type_check(parse(Preprocessor::new(Lexer::new("*stdin*", input.chars()))).unwrap().iter())
     }
 
     #[test]
