@@ -8,7 +8,7 @@ use parse::Expression;
 use parse::Block;
 use std::collections::HashMap;
 
-fn type_check_statement(statement: &Statement, statement_pos: &Pos,
+fn type_check_statement(statement: &Statement, statement_pos: &Pos, return_type: Option<&Type>,
                         global_definitions: &mut HashMap<String, Tag<Type>>,
                         local_definitions: &mut Vec<HashMap<String, Tag<Type>>>) -> io::Result<()> {
     match statement {
@@ -17,9 +17,9 @@ fn type_check_statement(statement: &Statement, statement_pos: &Pos,
                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                           format!("{} Condition of an if statement must be a number", cond.pos)));
             }
-            try!(type_check_statement(&true_.value, &true_.pos, global_definitions, local_definitions));
+            try!(type_check_statement(&true_.value, &true_.pos, return_type, global_definitions, local_definitions));
             match false_ {
-                &Some(ref false_) => { try!(type_check_statement(&false_.value, &false_.pos, global_definitions, local_definitions)); },
+                &Some(ref false_) => { try!(type_check_statement(&false_.value, &false_.pos, return_type, global_definitions, local_definitions)); },
                 &None => (),
             }
         },
@@ -28,21 +28,30 @@ fn type_check_statement(statement: &Statement, statement_pos: &Pos,
                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                           format!("{} Condition of a while statement must not have type void", cond.pos)));
             }
-            try!(type_check_statement(&body.value, &body.pos, global_definitions, local_definitions));
+            try!(type_check_statement(&body.value, &body.pos, return_type, global_definitions, local_definitions));
         },
         &Block(ref block) => {
             local_definitions.push(HashMap::new());
-            try!(type_check_block(block, global_definitions, local_definitions));
+            try!(type_check_block(block, return_type, global_definitions, local_definitions));
             local_definitions.pop();
         },
         &Expression(ref expression) => {
             try!(type_check_expression(expression, statement_pos, global_definitions, local_definitions));
         },
+        &Return(ref expression) => {
+            let type_ = try!(type_check_expression(&expression.value, statement_pos, global_definitions, local_definitions));
+            if let Some(ref return_type) = return_type {
+                if !type_.value.name.can_cast_to(&return_type.name) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                              format!("{} Return statement does not match function return type", statement_pos)))
+                }
+            }
+        },
     }
     Ok(())
 }
 
-fn type_check_block(block: &Block,
+fn type_check_block(block: &Block, return_type: Option<&Type>,
                     global_definitions: &mut HashMap<String, Tag<Type>>,
                     local_definitions: &mut Vec<HashMap<String, Tag<Type>>>) -> io::Result<()> {
     for declaration in &block.declarations {
@@ -50,7 +59,7 @@ fn type_check_block(block: &Block,
         try!(type_check_declaration(&declaration.value, &declaration.pos, global_definitions, local_definitions));
     }
     for statement in &block.statements {
-        try!(type_check_statement(&statement.value, &statement.pos, global_definitions, local_definitions));
+        try!(type_check_statement(&statement.value, &statement.pos, return_type, global_definitions, local_definitions));
     }
     Ok(())
 }
@@ -204,7 +213,7 @@ fn type_check_declaration(declaration: &Declaration, declaration_pos: &Pos,
             }
             local_definitions.push(local_scope);
             if let Some(ref block) = fun.body {
-                try!(type_check_block(&block.value, global_definitions, local_definitions));
+                try!(type_check_block(&block.value, Some(&fun.return_type.value), global_definitions, local_definitions));
                 local_definitions.pop();
             }
             Ok(())
@@ -390,5 +399,17 @@ mod test {
     #[test]
     fn type_check_array_lookup() {
         x("void g(int); int f(void) { int x[3]; g(x[0]); }").unwrap();
+    }
+
+    #[test]
+    fn type_check_return_void() {
+        x("void g() { return (void) 0; }").unwrap();
+    }
+
+    #[test]
+    fn type_check_return_int_but_return_custom_panic() {
+        assert_eq!(
+            "*stdin*:1:15: Return statement does not match function return type",
+            format!("{}", x("int g() { a x; return x; }").unwrap_err()));
     }
 }

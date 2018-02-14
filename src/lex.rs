@@ -110,6 +110,7 @@ pub enum Token {
     While,
     Const,
     Volatile,
+    Return,
     Int(c_int),
     Long(c_long),
     KeywordInt,

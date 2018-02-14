@@ -206,6 +206,8 @@ impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
                             Volatile
                         } else if s == "void" {
                             Void
+                        } else if s == "return" {
+                            Return
                         } else {
                             Label(s)
                         }, token.pos)))

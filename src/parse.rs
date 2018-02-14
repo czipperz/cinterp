@@ -93,6 +93,7 @@ pub enum Statement {
     If(Tag<Expression>, Box<Tag<Statement>>, Option<Box<Tag<Statement>>>),
     While(Tag<Expression>, Box<Tag<Statement>>),
     Block(Block),
+    Return(Tag<Expression>),
     Expression(Expression),
 }
 use self::Statement::*;
@@ -260,6 +261,7 @@ impl fmt::Display for Statement {
             &While(ref cond, ref body) => write!(fmt, "while ({}) {}", cond.value, body.value),
             &Block(ref block) => write!(fmt, "{}", block),
             &Expression(ref expression) => write!(fmt, "{};", expression),
+            &Return(ref expression) => write!(fmt, "return {};", expression.value),
         }
     }
 }
@@ -285,6 +287,21 @@ fn to_result<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
 fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
                                                    -> io::Result<(Option<Tag<Token>>, Tag<Statement>)> {
     match first.value {
+        Token::Return => {
+            let (next, expression) = try!(parse_expression(try!(try!(to_result(tokens.next())).ok_or_else(
+                || io::Error::new(io::ErrorKind::InvalidInput,
+                                  format!("{} Found EOF after `return` keyword", first.pos)))),
+                                                           tokens, false));
+            match next {
+                Some(next) => match next.value {
+                    Token::Semicolon => Ok((try!(to_result(tokens.next())), Tag::new(Return(expression.unwrap()), first.pos))),
+                    _ => Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                            format!("{} Expected semicolon here", next.pos))),
+                },
+                None => Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                           format!("{} Expected semicolon at end of statement started here", first.pos))),
+            }
+        },
         Token::Semicolon => {
             Ok((try!(to_result(tokens.next())), first.with_value(Expression(Void))))
         },
@@ -1425,5 +1442,23 @@ if (1) {
                 body: None }),
                           pos(1, 0))],
             parse("void function_name(void);").unwrap());
+    }
+
+    #[test]
+    fn parse_return_statement() {
+        assert_eq!(
+            vec![Tag::new(FunctionDeclaration(FunctionDeclaration {
+                return_type: Tag::new(Type { name: TypeName::Void,
+                                             is_const: false,
+                                             is_volatile: false },
+                                      pos(1, 0)),
+                name: Tag::new("function_name".to_owned(), pos(1, 5)),
+                params: vec![],
+                body: Some(Tag::new(Block {
+                    declarations: Vec::new(),
+                    statements: vec![Tag::new(Return(Tag::new(Label("x".to_owned()), pos(1, 34))), pos(1, 27))],
+                }, pos(1, 25))) }),
+                          pos(1, 0))],
+            parse("void function_name(void) { return x; }").unwrap());
     }
 }
