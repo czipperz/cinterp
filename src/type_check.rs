@@ -258,7 +258,7 @@ mod test {
     use preprocess::*;
 
     fn x(input: &str) -> io::Result<()> {
-        type_check(parse(Preprocessor::new(Lexer::new("*stdin*", input.chars()))).unwrap().iter())
+        type_check(parse(Preprocessor::new(Lexer::new("*stdin*", input.chars().map(Ok)))).unwrap().iter())
     }
 
     #[test]
@@ -404,6 +404,11 @@ mod test {
     #[test]
     fn type_check_return_void() {
         x("void g() { return (void) 0; }").unwrap();
+    }
+
+    #[test]
+    fn type_check_return_int_variable() {
+        x("int f0() { int x; x = 3; return x; }").unwrap();
     }
 
     #[test]

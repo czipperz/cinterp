@@ -287,7 +287,7 @@ fn to_result<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
 fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
                                                    -> io::Result<(Option<Tag<Token>>, Tag<Statement>)> {
     match first.value {
-        Token::Return => {
+        Token::KeywordReturn => {
             let (next, expression) = try!(parse_expression(try!(try!(to_result(tokens.next())).ok_or_else(
                 || io::Error::new(io::ErrorKind::InvalidInput,
                                   format!("{} Found EOF after `return` keyword", first.pos)))),
@@ -305,7 +305,7 @@ fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>
         Token::Semicolon => {
             Ok((try!(to_result(tokens.next())), first.with_value(Expression(Void))))
         },
-        Token::If => {
+        Token::KeywordIf => {
             let open_paren = try!(try!(to_result(tokens.next())).ok_or_else(
                 || io::Error::new(io::ErrorKind::InvalidInput,
                                   format!("{} Found EOF after `if` keyword", first.pos))));
@@ -322,7 +322,7 @@ fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>
             let (next, false_) = match next {
                 Some(next) =>
                     match next.value {
-                        Token::Else => {
+                        Token::KeywordElse => {
                             let (next, else_) = try!(parse_statement(try!(try!(to_result(tokens.next())).ok_or_else(
                                 || io::Error::new(io::ErrorKind::InvalidInput,
                                                   format!("{} Found EOF when expected body of else statement here", next.pos)))), tokens));
@@ -334,7 +334,7 @@ fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>
             };
             Ok((next, first.with_value(If(cond, Box::new(true_), false_.map(|f| Box::new(f))))))
         },
-        Token::While => {
+        Token::KeywordWhile => {
             let open_paren = try!(try!(to_result(tokens.next())).ok_or_else(
                 || io::Error::new(io::ErrorKind::InvalidInput,
                                   format!("{} Found EOF after `while` keyword", first.pos))));
@@ -350,7 +350,7 @@ fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>
                                   format!("{} Found EOF when expected body of while statement here", first.pos)))), tokens));
             Ok((next, first.with_value(While(cond, Box::new(body)))))
         },
-        Token::Else =>
+        Token::KeywordElse =>
             Err(io::Error::new(io::ErrorKind::InvalidInput,
                                format!("{} Unexpected `else`.  No `if` found", first.pos))),
         Token::Label(_) | Token::Int(_) | Token::Long(_) | Token::OpenParen => {
@@ -439,7 +439,7 @@ fn parse_block<I: Iterator<Item = io::Result<Tag<Token>>>>(open_curly_pos: Pos, 
                 return Ok((try!(to_result(tokens.next())),
                            Tag::new(Block { declarations, statements },
                                     open_curly_pos))),
-            Token::Label(_) | Token::Const | Token::Volatile | Token::KeywordInt | Token::KeywordLong => {
+            Token::Label(_) | Token::KeywordConst | Token::KeywordVolatile | Token::KeywordInt | Token::KeywordLong => {
                 let maybe = try!(parse_maybe_variable_declaration(n, tokens));
                 next = maybe.0;
                 match maybe.1 {
@@ -501,7 +501,7 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(
                         next = try!(to_result(tokens.next()));
                     }
                 },
-                Token::Void => {
+                Token::KeywordVoid => {
                     if embedded_type_name.is_some() {
                         return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                   format!("{} Unexpected keyword `void` after type declaration", n.pos)));
@@ -621,7 +621,7 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(
                         next = try!(to_result(tokens.next()));
                     },
                 },
-                Token::Const =>
+                Token::KeywordConst =>
                     if is_const {
                         return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                   format!("{} Unexpected `const`, variable was already declared `const`", n.pos)));
@@ -629,7 +629,7 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(
                         is_const = true;
                         next = try!(to_result(tokens.next()));
                     },
-                Token::Volatile => 
+                Token::KeywordVolatile => 
                     if is_volatile {
                         return Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                   format!("{} Unexpected `volatile`, variable was already declared `volatile`", n.pos)));
@@ -699,18 +699,18 @@ fn parse_type<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tok
     let mut base = Tag::new(Type { name: loop {
         match next {
             Some(nextu) => match nextu {
-                Token::Const => {
+                Token::KeywordConst => {
                     is_const = true;
                     next = try!(to_result(tokens.next())).map(|x| x.value);
                 },
-                Token::Volatile => {
+                Token::KeywordVolatile => {
                     is_volatile = true;
                     next = try!(to_result(tokens.next())).map(|x| x.value);
                 },
                 Token::KeywordInt => break TypeName::Int,
                 Token::KeywordLong => break TypeName::Long,
                 Token::Label(s) => break TypeName::Custom(s),
-                Token::Void => break TypeName::Void,
+                Token::KeywordVoid => break TypeName::Void,
                 _ => unimplemented!("{:?}", nextu),
             },
             None => return Err(io::Error::new(io::ErrorKind::InvalidInput,
@@ -730,13 +730,13 @@ fn parse_type<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tok
 }
 
 fn parse_expression<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>, type_allowed: bool)
-                                                    -> io::Result<(Option<Tag<Token>>, Result<Tag<Expression>, Tag<Type>>)> {
+                                                                -> io::Result<(Option<Tag<Token>>, Result<Tag<Expression>, Tag<Type>>)> {
     let mut next = None;
     let mut base = match first.value {
         Token::Label(first_name) => Tag::new(Label(first_name), first.pos.clone()),
         Token::Int(i) => Tag::new(Int(i), first.pos.clone()),
         Token::Long(l) => Tag::new(Long(l), first.pos.clone()),
-        Token::KeywordInt | Token::KeywordLong | Token::Const | Token::Volatile | Token::Void =>
+        Token::KeywordInt | Token::KeywordLong | Token::KeywordConst | Token::KeywordVolatile | Token::KeywordVoid =>
             if type_allowed {
                 let (next, type_) = try!(parse_type(first, tokens));
                 return Ok((next, Err(type_)));
@@ -879,15 +879,15 @@ mod test {
     use preprocess::*;
 
     fn parse(s: &str) -> io::Result<Vec<Tag<Declaration>>> {
-        super::parse(Preprocessor::new(Lexer::new("*stdin*", s.chars())))
+        super::parse(Preprocessor::new(Lexer::new("*stdin*", s.chars().map(Ok))))
     }
 
     fn parse_command_line(s: &str) -> io::Result<Vec<Result<Tag<Declaration>, Tag<Statement>>>> {
-        super::parse_command_line(Preprocessor::new(Lexer::new("*stdin*", s.chars())))
+        super::parse_command_line(Preprocessor::new(Lexer::new("*stdin*", s.chars().map(Ok))))
     }
 
     fn parse_statements(s: &str) -> io::Result<Vec<Tag<Statement>>> {
-        let tokens = Preprocessor::new(Lexer::new("*stdin*", s.chars()));
+        let tokens = Preprocessor::new(Lexer::new("*stdin*", s.chars().map(Ok)));
         let mut statements = Vec::new();
         let mut tokens = PrefixIterator::new(tokens.into_iter().fuse());
         match try!(to_result(tokens.next())) {

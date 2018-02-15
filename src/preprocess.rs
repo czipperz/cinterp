@@ -1,21 +1,22 @@
 use pos::*;
 use lex::*;
+use prefix::*;
 use std::io;
 use std::collections::HashMap;
 use Token::*;
 
-pub struct Preprocessor<I: Iterator<Item = char>> {
+pub struct Preprocessor<I: Iterator<Item = io::Result<Tag<Token>>>> {
     //files: Vec<Lexer<ReaderIterator>>,
     definitions: HashMap<String, Vec<Tag<Token>>>,
-    main_lexer: Lexer<I>,
+    main_lexer: PrefixIterator<I>,
     if_macros: usize,
 }
 
-impl<I: Iterator<Item = char>> Preprocessor<I> {
-    pub fn new(main_lexer: Lexer<I>) -> Self {
+impl<I: Iterator<Item = io::Result<Tag<Token>>>> Preprocessor<I> {
+    pub fn new(main_lexer: I) -> Self {
         Preprocessor {
             definitions: HashMap::new(),
-            main_lexer,
+            main_lexer: PrefixIterator::new(main_lexer),
             if_macros: 0,
         }
     }
@@ -65,7 +66,7 @@ impl<I: Iterator<Item = char>> Preprocessor<I> {
     }
 }
 
-impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
+impl<I: Iterator<Item = io::Result<Tag<Token>>>> Iterator for Preprocessor<I> {
     type Item = io::Result<Tag<Token>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -150,7 +151,7 @@ impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
                                                 None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                                                        format!("{} Found EOF when expected a macro name after # here", next.pos)))),
                                             }) {
-                                                self.main_lexer.push(Tag::new(Macro(next.value), next.pos));
+                                                self.main_lexer.push(Ok(Tag::new(Macro(next.value), next.pos)));
                                             }
                                             self.next()
                                         },
@@ -163,7 +164,7 @@ impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
                                 // skip over body until endif
                                 match self.skip_over_macros_until_else() {
                                     Some(Ok(next)) => {
-                                        self.main_lexer.push(Tag::new(Macro(next.value), next.pos));
+                                        self.main_lexer.push(Ok(Tag::new(Macro(next.value), next.pos)));
                                         self.next()
                                     },
                                     Some(Err(e)) => Some(Err(e)),
@@ -187,27 +188,27 @@ impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
                     Some(Ok(Tag::new(
                         if self.definitions.contains_key(&s) {
                             for token in self.definitions.get(&s).as_ref().unwrap().iter().rev() {
-                                self.main_lexer.push(token.clone());
+                                self.main_lexer.push(Ok(token.clone()));
                             }
                             return self.next()
                         } else if s == "if" {
-                            If
+                            KeywordIf
                         } else if s == "else" {
-                            Else
+                            KeywordElse
                         } else if s == "while" {
-                            While
+                            KeywordWhile
                         } else if s == "int" {
                             KeywordInt
                         } else if s == "long" {
                             KeywordLong
                         } else if s == "const" {
-                            Const
+                            KeywordConst
                         } else if s == "volatile" {
-                            Volatile
+                            KeywordVolatile
                         } else if s == "void" {
-                            Void
+                            KeywordVoid
                         } else if s == "return" {
-                            Return
+                            KeywordReturn
                         } else {
                             Label(s)
                         }, token.pos)))
@@ -223,11 +224,10 @@ impl<I: Iterator<Item = char>> Iterator for Preprocessor<I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use Token::*;
     use std::rc::Rc;
 
     fn preprocess(s: &str) -> io::Result<Vec<Tag<Token>>> {
-        Preprocessor::new(Lexer::new("*stdin*", s.chars())).collect()
+        Preprocessor::new(Lexer::new("*stdin*", s.chars().map(Ok))).collect()
     }
 
     fn pos(y: usize, x: usize) -> Pos {
@@ -333,7 +333,7 @@ int i EQ_1").unwrap());
     #[test]
     fn preprocess_ifndef_then_define() {
         assert_eq!(
-            vec![Tag::new(If, pos(2, 14))],
+            vec![Tag::new(KeywordIf, pos(2, 14))],
             preprocess("#ifndef Value
 #define Value if
 #endif

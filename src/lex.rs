@@ -5,37 +5,38 @@ use pos::*;
 use prefix::*;
 use std::iter::Fuse;
 
-struct Tagged<I: Iterator<Item = char>> {
+struct Tagged<I: Iterator<Item = io::Result<char>>> {
     pos: Pos,
     iter: Fuse<I>,
 }
 
-impl<I: Iterator<Item = char>> Tagged<I> {
+impl<I: Iterator<Item = io::Result<char>>> Tagged<I> {
     fn new(file_name: &str, iter: Fuse<I>) -> Self {
         Tagged { pos: Pos::new(Rc::new(file_name.to_owned()), 1, 0), iter }
     }
 }
 
-impl<I: Iterator<Item = char>> Iterator for Tagged<I> {
-    type Item = Tag<char>;
+impl<I: Iterator<Item = io::Result<char>>> Iterator for Tagged<I> {
+    type Item = io::Result<Tag<char>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.iter.next() {
-            Some(c) => {
+            Some(Ok(c)) => {
                 let pos = self.pos.clone();
                 self.pos.advance(c);
-                Some(Tag::new(c, pos))
+                Some(Ok(Tag::new(c, pos)))
             },
+            Some(Err(e)) => Some(Err(e)),
             None => None,
         }
     }
 }
 
-struct Prelexer<I: Iterator<Item = char>> {
+struct Prelexer<I: Iterator<Item = io::Result<char>>> {
     iter: PrefixIterator<Tagged<I>>,
 }
 
-impl<I: Iterator<Item = char>> Prelexer<I> {
+impl<I: Iterator<Item = io::Result<char>>> Prelexer<I> {
     fn new(file_name: &str, iter: Fuse<I>) -> Self {
         Prelexer {
             iter: PrefixIterator::new(Tagged::new(file_name, iter)),
@@ -43,45 +44,46 @@ impl<I: Iterator<Item = char>> Prelexer<I> {
     }
 
     fn push(&mut self, c: Tag<char>) {
-        self.iter.push(c)
+        self.iter.push(Ok(c))
     }
 }
 
-impl<I: Iterator<Item = char>> Iterator for Prelexer<I> {
+impl<I: Iterator<Item = io::Result<char>>> Iterator for Prelexer<I> {
     type Item = io::Result<Tag<char>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.iter.next() {
-            Some(c) => {
+            Some(Ok(c)) => {
                 if c.value == '\\' {
                     match self.iter.next() {
-                        Some(escaped) => {
+                        Some(Ok(escaped)) => {
                             if escaped.value == '\n' {
-                                self.iter.next().map(Ok)
+                                self.iter.next()
                             } else {
-                                self.iter.push(escaped);
+                                self.iter.push(Ok(escaped));
                                 Some(Ok(c))
                             }
                         },
-                        None => {
-                            Some(Ok(c))
-                        }
+                        Some(Err(e)) => Some(Err(e)),
+                        None => Some(Ok(c)),
                     }
                 } else if c.value == '/' {
                     match self.iter.next() {
-                        Some(Tag { value: '*', pos: _ }) => {
+                        Some(Ok(Tag { value: '*', pos: _ })) => {
                             let mut next = self.iter.next();
                             loop {
                                 match next {
-                                    Some(Tag { value: '*', pos: _ }) => {
+                                    Some(Ok(Tag { value: '*', pos: _ })) => {
                                         match self.iter.next() {
-                                            Some(Tag { value: '/', pos: _ }) => return Some(Ok(Tag::new(' ', c.pos))),
-                                            Some(c) => next = Some(c),
+                                            Some(Ok(Tag { value: '/', pos: _ })) => return Some(Ok(Tag::new(' ', c.pos))),
+                                            Some(Ok(c)) => next = Some(Ok(c)),
+                                            Some(Err(e)) => return Some(Err(e)),
                                             None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                                                    format!("{} Found EOF when expected end of comment started here", c.pos)))),
                                         }
                                     },
-                                    Some(_) => next = self.iter.next(),
+                                    Some(Ok(_)) => next = self.iter.next(),
+                                    Some(Err(e)) => return Some(Err(e)),
                                     None => return Some(Err(io::Error::new(io::ErrorKind::InvalidInput,
                                                                            format!("{} Found EOF when expected end of comment started here", c.pos)))),
                                 }
@@ -97,6 +99,7 @@ impl<I: Iterator<Item = char>> Iterator for Prelexer<I> {
                     Some(Ok(c))
                 }
             },
+            Some(Err(e)) => Some(Err(e)),
             None => None,
         }
     }
@@ -105,17 +108,17 @@ impl<I: Iterator<Item = char>> Iterator for Prelexer<I> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     Label(String),
-    If,
-    Else,
-    While,
-    Const,
-    Volatile,
-    Return,
     Int(c_int),
     Long(c_long),
+    KeywordIf,
+    KeywordElse,
+    KeywordWhile,
+    KeywordConst,
+    KeywordVolatile,
+    KeywordReturn,
     KeywordInt,
     KeywordLong,
-    Void,
+    KeywordVoid,
     Semicolon,
     OpenParen,
     CloseParen,
@@ -129,7 +132,7 @@ pub enum Token {
 }
 use self::Token::*;
 
-pub struct Lexer<I: Iterator<Item = char>> {
+pub struct Lexer<I: Iterator<Item = io::Result<char>>> {
     iter: Prelexer<I>,
     hash_valid_here: bool,
     reserve: Vec<Tag<Token>>,
@@ -143,7 +146,7 @@ fn narrow_number(x: c_long) -> Token {
     }
 }
 
-impl<I: Iterator<Item = char>> Lexer<I> {
+impl<I: Iterator<Item = io::Result<char>>> Lexer<I> {
     pub fn new(file_name: &str, iter: I) -> Self {
         Lexer {
             iter: Prelexer::new(file_name, iter.fuse()),
@@ -157,7 +160,7 @@ impl<I: Iterator<Item = char>> Lexer<I> {
     }
 }
 
-impl<I: Iterator<Item = char>> Iterator for Lexer<I> {
+impl<I: Iterator<Item = io::Result<char>>> Iterator for Lexer<I> {
     type Item = io::Result<Tag<Token>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -279,7 +282,7 @@ mod test {
     }
 
     fn prelex(s: &str) -> io::Result<Vec<Tag<char>>> {
-        Prelexer::new("*stdin*", s.chars().fuse()).collect()
+        Prelexer::new("*stdin*", s.chars().map(Ok).fuse()).collect()
     }
 
     #[test]
@@ -324,7 +327,7 @@ mod test {
     }
 
     fn lex(s: &str) -> io::Result<Vec<Tag<Token>>> {
-        Lexer::new("*stdin*", s.chars()).collect()
+        Lexer::new("*stdin*", s.chars().map(Ok)).collect()
     }
 
     #[test]
