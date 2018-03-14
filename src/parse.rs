@@ -18,8 +18,8 @@ pub enum TypeName {
     Int,
     Long,
     Custom(String),
-    //Pointer(Box<Type>),
-    Array(Box<TypeName>, Option<Tag<Expression>>),
+    Pointer(Box<Type>),
+    Array(Box<Type>, Option<Tag<Expression>>),
     FunctionPointer(Box<Tag<Type>>, Vec<Tag<Type>>),
 }
 
@@ -73,6 +73,7 @@ pub enum Expression {
     Index(Box<Tag<Expression>>, Box<Tag<Expression>>),
     Set(Box<Tag<Expression>>, Box<Tag<Expression>>),
     Cast(Box<Tag<Type>>, Box<Tag<Expression>>),
+    Dereference(Box<Tag<Expression>>),
     Int(c_int),
     Long(c_long),
     Void,
@@ -100,13 +101,14 @@ use self::Statement::*;
 
 impl fmt::Display for Type {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        try!(write!(fmt, "{}", self.name));
         if self.is_const {
-            try!(write!(fmt, "const "));
+            try!(write!(fmt, " const"));
         }
         if self.is_volatile {
-            try!(write!(fmt, "volatile "));
+            try!(write!(fmt, " volatile"));
         }
-        write!(fmt, "{}", self.name)
+        Ok(())
     }
 }
 
@@ -118,6 +120,7 @@ impl fmt::Display for TypeName {
             &Int => write!(fmt, "int"),
             &Long => write!(fmt, "long"),
             &Custom(ref c) => write!(fmt, "{}", c),
+            &Pointer(ref embedded) => write!(fmt, "{}*", embedded),
             &Array(ref embedded, Some(ref expr)) => write!(fmt, "{}[{}]", embedded, expr.value),
             &Array(ref embedded, None) => write!(fmt, "{}[]", embedded),
             &FunctionPointer(ref type_, ref params) => {
@@ -240,6 +243,10 @@ impl fmt::Display for Expression {
                 try!(write!(fmt, "({})", type_.value));
                 parenthesize_progn(&expression.as_ref().value, fmt)
             },
+            &Dereference(ref expression) => {
+                try!(write!(fmt, "*"));
+                parenthesize_progn(&expression.value, fmt)
+            },
             &Int(i) => write!(fmt, "{}", i),
             &Long(l) => write!(fmt, "{}", l),
             &Void => Ok(()),
@@ -267,7 +274,7 @@ impl fmt::Display for Statement {
 }
 
 fn parse_top_level<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
-                                                   -> io::Result<(Option<Tag<Token>>, Tag<Declaration>)> {
+                                                               -> io::Result<(Option<Tag<Token>>, Tag<Declaration>)> {
     let (n, d) = try!(parse_maybe_variable_declaration(first, tokens));
     match d {
         Ok(d) => Ok((n, d)),
@@ -285,7 +292,7 @@ fn to_result<T, E>(x: Option<Result<T, E>>) -> Result<Option<T>, E> {
 }
 
 fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
-                                                   -> io::Result<(Option<Tag<Token>>, Tag<Statement>)> {
+                                                               -> io::Result<(Option<Tag<Token>>, Tag<Statement>)> {
     match first.value {
         Token::KeywordReturn => {
             let (next, expression) = try!(parse_expression(try!(try!(to_result(tokens.next())).ok_or_else(
@@ -353,7 +360,7 @@ fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>
         Token::KeywordElse =>
             Err(io::Error::new(io::ErrorKind::InvalidInput,
                                format!("{} Unexpected `else`.  No `if` found", first.pos))),
-        Token::Label(_) | Token::Int(_) | Token::Long(_) | Token::OpenParen => {
+        Token::Star | Token::Label(_) | Token::Int(_) | Token::Long(_) | Token::OpenParen => {
             let first_pos = first.pos.clone();
             let (next, expr) = try!(parse_expression(first, tokens, false));
             let expr = expr.unwrap();
@@ -379,7 +386,7 @@ fn parse_statement<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>
 }
 
 fn parse_params<I: Iterator<Item = io::Result<Tag<Token>>>>(open_paren_pos: &Pos, tokens: &mut PrefixIterator<I>)
-                                                -> io::Result<(Option<Tag<Token>>, Vec<(Option<String>, Tag<Type>)>)> {
+                                                            -> io::Result<(Option<Tag<Token>>, Vec<(Option<String>, Tag<Type>)>)> {
     let mut params = Vec::new();
     loop {
         match try!(try!(to_result(tokens.next())).ok_or_else(
@@ -426,7 +433,7 @@ fn parse_params<I: Iterator<Item = io::Result<Tag<Token>>>>(open_paren_pos: &Pos
 }
 
 fn parse_block<I: Iterator<Item = io::Result<Tag<Token>>>>(open_curly_pos: Pos, tokens: &mut PrefixIterator<I>)
-                                               -> io::Result<(Option<Tag<Token>>, Tag<Block>)> {
+                                                           -> io::Result<(Option<Tag<Token>>, Tag<Block>)> {
     let mut declarations = Vec::new();
     let mut statements = Vec::new();
     let mut next = try!(to_result(tokens.next()));
@@ -474,7 +481,7 @@ fn parse_block<I: Iterator<Item = io::Result<Tag<Token>>>>(open_curly_pos: Pos, 
 }
 
 fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
-                                                                    -> io::Result<(Option<Tag<Token>>, Result<Tag<Declaration>, Tag<Statement>>)> {
+                                                                                -> io::Result<(Option<Tag<Token>>, Result<Tag<Declaration>, Tag<Statement>>)> {
     let first_pos = first.pos.clone();
     let mut next = Some(first);
     let mut is_const = false;
@@ -556,9 +563,9 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(
                                                 return Ok((try!(to_result(tokens.next())),
                                                            Ok(Tag::new(VariableDeclaration(VariableDeclaration {
                                                                type_: Tag::new(Type {
-                                                                   name: TypeName::Array(Box::new(type_.value.name),
+                                                                   name: TypeName::Array(Box::new(type_.value),
                                                                                          Some(expr)),
-                                                                   is_const: type_.value.is_const, is_volatile: type_.value.is_volatile },
+                                                                   is_const: true, is_volatile: false },
                                                                                type_.pos),
                                                                name: Tag::new(label, n.pos), value: None }),
                                                                        first_pos))));
@@ -637,6 +644,26 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(
                         is_volatile = true;
                         next = try!(to_result(tokens.next()));
                     },
+                Token::Star =>
+                    match embedded_type_name {
+                        Some((type_name, pos)) => {
+                            embedded_type_name = Some((TypeName::Pointer(Box::new(
+                                Type { name: type_name, is_const, is_volatile })), pos));
+                            is_const = false;
+                            is_volatile = false;
+                            next = try!(to_result(tokens.next()));
+                        },
+                        None => {
+                            if is_const || is_volatile {
+                                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                                          format!("{} Must have a type name to make into a pointer", n.pos)));
+                            } else {
+                                let (next, expression) = try!(parse_expression(Tag::new(n.value, n.pos), tokens, false));
+                                let expression = expression.unwrap();
+                                return Ok((next, Err(Tag::new(Expression(expression.value), expression.pos))))
+                            }
+                        },
+                    },
                 _ => {
                     // Maybe got a type name but no variable name
                     match embedded_type_name {
@@ -671,7 +698,7 @@ fn parse_maybe_variable_declaration<I: Iterator<Item = io::Result<Tag<Token>>>>(
 }
 
 fn parse_paren<I: Iterator<Item = io::Result<Tag<Token>>>>(open_paren_pos: &Pos, tokens: &mut PrefixIterator<I>)
-                                               -> io::Result<(Option<Tag<Token>>, Result<Tag<Expression>, Tag<Type>>)> {
+                                                           -> io::Result<(Option<Tag<Token>>, Result<Tag<Expression>, Tag<Type>>)> {
     match try!(to_result(tokens.next())) {
         Some(Tag { value: Token::CloseParen, pos: _ }) =>
             Ok((try!(to_result(tokens.next())), Ok(Tag::new(Progn(Vec::new()), open_paren_pos.clone())))),
@@ -691,7 +718,7 @@ fn parse_paren<I: Iterator<Item = io::Result<Tag<Token>>>>(open_paren_pos: &Pos,
 }
 
 fn parse_type<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>)
-                                              -> io::Result<(Option<Tag<Token>>, Tag<Type>)> {
+                                                          -> io::Result<(Option<Tag<Token>>, Tag<Type>)> {
     let mut is_const = false;
     let mut is_volatile = false;
     let first_pos = first.pos;
@@ -721,6 +748,15 @@ fn parse_type<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tok
     let mut next = try!(to_result(tokens.next()));
     loop {
         match next {
+            Some(Tag { value: Token::Star, pos: _ }) => {
+                base = Tag::new(Type {
+                    name: TypeName::Pointer(Box::new(base.value)),
+                    is_const: false,
+                    is_volatile: false,
+                },
+                                base.pos);
+                next = try!(to_result(tokens.next()));
+            }
             Some(Tag { value: Token::OpenSquare, pos }) => {
                 unimplemented!()
             }
@@ -729,7 +765,27 @@ fn parse_type<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tok
     }
 }
 
-fn parse_expression<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>, type_allowed: bool)
+fn precedence(t: &Token) -> (bool, usize) {
+    use Token::*;
+    match *t {
+        Label(_) | Int(_) | Long(_) | OpenParen | CloseParen | OpenSquare | CloseSquare | OpenCurly |
+        CloseCurly => (true, 0),
+        Set => (false, 90),
+        Comma => (false, 99),
+        KeywordIf | KeywordElse | KeywordWhile | KeywordConst | KeywordVolatile | KeywordReturn |
+        KeywordInt | KeywordLong | KeywordVoid => panic!(),
+        Star => (false, 10),
+        Semicolon => (false, 100),
+        Macro(_) => unreachable!(),
+    }
+}
+
+fn should_continue(token: &Token, max: usize) -> bool {
+    let (eq, v) = precedence(token);
+    if eq { v <= max } else { v < max }
+}
+
+fn parse_expression<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token>, tokens: &mut PrefixIterator<I>, max: usize, type_allowed: bool)
                                                                 -> io::Result<(Option<Tag<Token>>, Result<Tag<Expression>, Tag<Type>>)> {
     let mut next = None;
     let mut base = match first.value {
@@ -758,11 +814,17 @@ fn parse_expression<I: Iterator<Item = io::Result<Tag<Token>>>>(first: Tag<Token
                     let (n, expr) = try!(parse_expression(try!(n.ok_or_else(
                         || io::Error::new(io::ErrorKind::InvalidInput,
                                           format!("{} Nothing to type cast", first.pos)))),
-                                                          tokens, false));
+                                                          tokens, 1010 false));
                     let expr = expr.unwrap();
                     return Ok((n, Ok(Tag::new(Cast(Box::new(type_), Box::new(expr)), first.pos))));
                 }
             }
+        },
+        Token::Star => {
+            let (n, expr) = try!(parse_expression(try!(to_result(tokens.next())).ok_or_else(
+                || io::Error::new(io::ErrorKind::InvalidInput,
+                                  format!("{} Nothing to type cast", first.pos))),
+                                                  tokens, false))
         },
         _ => unimplemented!("{:?}", first),
     };
@@ -1229,7 +1291,6 @@ if (1) {
             parse("int i = 3;").unwrap());
     }
 
-
     #[test]
     fn parse_set_variable() {
         assert_eq!(
@@ -1265,6 +1326,28 @@ if (1) {
     }
 
     #[test]
+    fn parse_set_pointer_variable() {
+        assert_eq!(
+            vec![Ok(Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type {
+                    name: TypeName::Pointer(Box::new(Type { name: TypeName::Int,
+                                                            is_const: false,
+                                                            is_volatile: false })),
+                    is_const: false,
+                    is_volatile: false,
+                }, pos(1, 0)),
+                name: Tag::new("i".to_owned(), pos(1, 5)),
+                value: None,
+            }), pos(1, 0))),
+                 Err(Tag::new(Expression(Set(Box::new(Tag::new(Dereference(Box::new(Tag::new(Label("i".to_owned()), pos(1, 9)))),
+                                                               pos(1, 8))),
+                                             Box::new(Tag::new(Int(3),
+                                                               pos(1, 13))))),
+                              pos(1, 8)))],
+            parse_command_line("int* i; *i = 3;").unwrap());
+    }
+
+    #[test]
     fn parse_top_level_statement_1_panic() {
         let err = parse("{
     if (1) {
@@ -1292,21 +1375,45 @@ if (1) {
     }
 
     #[test]
-    fn parse_array() {
+    fn parse_array_pointer_declaration() {
         assert_eq!(
             vec![Ok(Tag::new(VariableDeclaration(VariableDeclaration {
                 type_: Tag::new(
                     Type {
-                        name: TypeName::Array(Box::new(TypeName::Int),
-                                              Some(Tag::new(Int(3),
-                                                            pos(1, 6)))),
-                        is_const: false,
+                        name: TypeName::Array(Box::new(Type { name:
+                                                              TypeName::Pointer(Box::new(Type { name: TypeName::Int,
+                                                                                                is_const: false,
+                                                                                                is_volatile: false })),
+                                                              is_const: false, is_volatile: false }),
+                                              Some(Tag::new(Int(3), pos(1, 7)))),
+                        is_const: true,
                         is_volatile: false,
                     }, pos(1, 0)),
-                name: Tag::new("i".to_owned(), pos(1, 4)),
+                name: Tag::new("i".to_owned(), pos(1, 5)),
                 value: None, }),
                           pos(1, 0)))],
-            parse_command_line("int i[3];").unwrap());
+            parse_command_line("int* i[3];").unwrap());
+    }
+
+    #[test]
+    fn parse_array_pointer_declaration_cv_quals() {
+        assert_eq!(
+            vec![Ok(Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(
+                    Type {
+                        name: TypeName::Array(Box::new(Type { name:
+                                                              TypeName::Pointer(Box::new(Type { name: TypeName::Int,
+                                                                                                is_const: false,
+                                                                                                is_volatile: true })),
+                                                              is_const: true, is_volatile: false }),
+                                              Some(Tag::new(Int(3), pos(1, 22)))),
+                        is_const: true,
+                        is_volatile: false,
+                    }, pos(1, 0)),
+                name: Tag::new("i".to_owned(), pos(1, 20)),
+                value: None, }),
+                          pos(1, 0)))],
+            parse_command_line("int volatile* const i[3];").unwrap());
     }
 
     #[test]
@@ -1385,8 +1492,11 @@ if (1) {
     fn parse_array_declaration() {
         assert_eq!(
             vec![Tag::new(VariableDeclaration(VariableDeclaration {
-                type_: Tag::new(Type { name: TypeName::Array(Box::new(TypeName::Int), Some(Tag::new(Int(3), pos(1, 6)))),
-                                       is_const: false,
+                type_: Tag::new(Type { name: TypeName::Array(Box::new(Type { name: TypeName::Int,
+                                                                             is_const: false,
+                                                                             is_volatile: false }),
+                                                             Some(Tag::new(Int(3), pos(1, 6)))),
+                                       is_const: true,
                                        is_volatile: false }, pos(1, 0)),
                 name: Tag::new("f".to_owned(), pos(1, 4)),
                 value: None,
@@ -1460,5 +1570,156 @@ if (1) {
                 }, pos(1, 25))) }),
                           pos(1, 0))],
             parse("void function_name(void) { return x; }").unwrap());
+    }
+
+    #[test]
+    fn parse_variable_pointer() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type { name: TypeName::Pointer(Box::new(Type {
+                    name: TypeName::Int,
+                    is_const: false,
+                    is_volatile: false,
+                })),
+                                       is_const: false,
+                                       is_volatile: false, },
+                                pos(1, 0)),
+                name: Tag::new("ptr".to_owned(), pos(1, 5)),
+                value: None }),
+                          pos(1, 0))],
+            parse("int* ptr;").unwrap());
+    }
+
+    #[test]
+    fn parse_volatile_variable_const_pointer() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type { name: TypeName::Pointer(Box::new(Type {
+                    name: TypeName::Int,
+                    is_const: false,
+                    is_volatile: true,
+                })),
+                                       is_const: true,
+                                       is_volatile: false, },
+                                pos(1, 9)),
+                name: Tag::new("ptr".to_owned(), pos(1, 20)),
+                value: None }),
+                          pos(1, 0))],
+            parse("volatile int* const ptr;").unwrap());
+    }
+
+    #[test]
+    fn parse_const_volatile_variable_pointer() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type { name: TypeName::Pointer(Box::new(Type {
+                    name: TypeName::Int,
+                    is_const: true,
+                    is_volatile: true,
+                })),
+                                       is_const: false,
+                                       is_volatile: false, },
+                                pos(1, 15)),
+                name: Tag::new("ptr".to_owned(), pos(1, 20)),
+                value: None }),
+                          pos(1, 0))],
+            parse("const volatile int* ptr;").unwrap());
+    }
+
+    #[test]
+    fn parse_volatile_variable_volatile_pointer() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type { name: TypeName::Pointer(Box::new(Type {
+                    name: TypeName::Int,
+                    is_const: false,
+                    is_volatile: true,
+                })),
+                                       is_const: false,
+                                       is_volatile: true, },
+                                pos(1, 9)),
+                name: Tag::new("ptr".to_owned(), pos(1, 23)),
+                value: None }),
+                          pos(1, 0))],
+            parse("volatile int* volatile ptr;").unwrap());
+    }
+
+    #[test]
+    fn parse_volatile_variable_pointer_volatile_pointer() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type { name: TypeName::Pointer(Box::new(Type {
+                    name: TypeName::Pointer(Box::new(Type { name: TypeName::Int,
+                                                            is_const: false,
+                                                            is_volatile: true, })),
+                    is_const: false,
+                    is_volatile: false,
+                })),
+                                       is_const: false,
+                                       is_volatile: true, },
+                                pos(1, 9)),
+                name: Tag::new("ptr".to_owned(), pos(1, 24)),
+                value: None }),
+                          pos(1, 0))],
+            parse("volatile int** volatile ptr;").unwrap());
+    }
+
+    #[test]
+    fn parse_cv_variable_cv_pointer_cv_pointer() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration {
+                type_: Tag::new(Type { name: TypeName::Pointer(Box::new(Type {
+                    name: TypeName::Pointer(Box::new(Type { name: TypeName::Int,
+                                                            is_const: true,
+                                                            is_volatile: true, })),
+                    is_const: true,
+                    is_volatile: true,
+                })),
+                                       is_const: true,
+                                       is_volatile: true, },
+                                pos(1, 15)),
+                name: Tag::new("ptr".to_owned(), pos(1, 51)),
+                value: None }),
+                          pos(1, 0))],
+            parse("const volatile int* const volatile* const volatile ptr;").unwrap());
+    }
+
+    #[test]
+    fn parse_int_const_i() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(VariableDeclaration { type_: Tag::new(Type { name: TypeName::Int,
+                                                                                           is_const: true,
+                                                                                           is_volatile: true, },
+                                                                                    pos(1, 9)),
+                                                                    name: Tag::new("i".to_owned(), pos(1, 19)),
+                                                                    value: None }),
+                          pos(1, 0))],
+            parse("volatile int const i;").unwrap());
+    }
+
+    #[test]
+    fn parse_cast_to_ptr() {
+        assert_eq!(
+            vec![Tag::new(VariableDeclaration(
+                VariableDeclaration { type_:
+                                      Tag::new(
+                                          Type {
+                                              name: TypeName::Pointer(Box::new(
+                                                  Type { name: TypeName::Int,
+                                                         is_const: false,
+                                                         is_volatile: false, })),
+                                              is_const: false, is_volatile: false, },
+                                          pos(1, 0)),
+                                      name: Tag::new("i".to_owned(), pos(1, 5)),
+                                      value: Some(Tag::new(Cast(Box::new(Tag::new(
+                                          Type {
+                                              name: TypeName::Pointer(Box::new(Type { name: TypeName::Int, is_const: false, is_volatile: false })),
+                                              is_const: false,
+                                              is_volatile: false,
+                                          }, pos(1, 10))),
+                                                                Box::new(Tag::new(Int(0), pos(1, 16)))),
+                                                           pos(1, 9))) }),
+                          pos(1, 0))],
+            parse("int* i = (int*) 0;").unwrap());
     }
 }

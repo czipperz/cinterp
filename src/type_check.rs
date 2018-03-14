@@ -120,20 +120,14 @@ fn type_check_expression(expression: &Expression, expression_pos: &Pos,
             let value_type = try!(type_check_expression(&value.value, &value.pos, global_definitions, local_definitions));
             if let TypeName::Array(array_type, _) = name_type.value.name {
                 if value_type.value.name.can_cast_to(&SIZE_T) {
-                    Ok(Tag::new(Type { name: *array_type,
-                                       is_const: name_type.value.is_const,
-                                       is_volatile: name_type.value.is_volatile },
-                                name_type.pos))
+                    Ok(Tag::new(*array_type, name_type.pos))
                 } else {
                     Err(io::Error::new(io::ErrorKind::InvalidInput,
                                        format!("{} Array must be indexed by a number", value_type.pos)))
                 }
             } else if let TypeName::Array(array_type, _) = value_type.value.name {
                 if name_type.value.name.can_cast_to(&SIZE_T) {
-                    Ok(Tag::new(Type { name: *array_type,
-                                       is_const: value_type.value.is_const,
-                                       is_volatile: value_type.value.is_volatile },
-                                value_type.pos))
+                    Ok(Tag::new(*array_type, value_type.pos))
                 } else {
                     Err(io::Error::new(io::ErrorKind::InvalidInput,
                                        format!("{} Array must be indexed by a number", name_type.pos)))
@@ -146,7 +140,10 @@ fn type_check_expression(expression: &Expression, expression_pos: &Pos,
         &Set(ref name, ref value) => {
             let name_type = try!(type_check_expression(&name.value, &name.pos, global_definitions, local_definitions));
             let value_type = try!(type_check_expression(&value.value, &value.pos, global_definitions, local_definitions));
-            if value_type.value.name.can_cast_to(&name_type.value.name) {
+            if name_type.value.is_const {
+                Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                   format!("{} Cannot assign to const variable here", expression_pos)))
+            } else if value_type.value.name.can_cast_to(&name_type.value.name) {
                 Ok(name_type)
             } else {
                 Err(io::Error::new(io::ErrorKind::InvalidInput,
@@ -160,6 +157,15 @@ fn type_check_expression(expression: &Expression, expression_pos: &Pos,
             } else {
                 Err(io::Error::new(io::ErrorKind::InvalidInput,
                                    format!("{} Invalid cast of {} to {} here", expression_pos, expression_type.value.name, casted_type.value.name)))
+            }
+        },
+        &Dereference(ref expression) => {
+            let expression_type = try!(type_check_expression(&expression.value, &expression.pos, global_definitions, local_definitions));
+            match expression_type.value.name {
+                TypeName::Pointer(embedded) => Ok(Tag::new(*embedded, expression_type.pos)),
+                TypeName::Array(embedded, _) => Ok(Tag::new(*embedded, expression_type.pos)),
+                _ => Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                        format!("{} Invalid dereference here", expression_pos))),
             }
         },
         &Int(_) => Ok(Tag::new(Type { name: TypeName::Int,
@@ -247,6 +253,21 @@ pub fn type_check<'a, I: Iterator<Item = &'a Tag<Declaration>>>(mut iter: I) -> 
     while let Some(declaration) = iter.next() {
         try!(define_variable(&declaration.value, &declaration.pos, &mut global_definitions));
         try!(type_check_declaration(&declaration.value, &declaration.pos, &mut global_definitions, &mut Vec::new()));
+    }
+    Ok(())
+}
+
+pub fn type_check_command_line<'a, I: Iterator<Item = &'a Result<Tag<Declaration>, Tag<Statement>>>>(mut iter: I, global_definitions: &mut HashMap<String, Tag<Type>>) -> io::Result<()> {
+    while let Some(next) = iter.next() {
+        match next {
+            &Ok(ref declaration) => {
+                try!(define_variable(&declaration.value, &declaration.pos, global_definitions));
+                try!(type_check_declaration(&declaration.value, &declaration.pos, global_definitions, &mut Vec::new()));
+            },
+            &Err(ref statement) => {
+                try!(type_check_statement(&statement.value, &statement.pos, None, global_definitions, &mut Vec::new()));
+            },
+        }
     }
     Ok(())
 }
@@ -416,5 +437,26 @@ mod test {
         assert_eq!(
             "*stdin*:1:15: Return statement does not match function return type",
             format!("{}", x("int g() { a x; return x; }").unwrap_err()));
+    }
+
+    #[test]
+    fn type_check_const_assignment_panic() {
+        assert_eq!(
+            "*stdin*:1:27: Cannot assign to const variable here",
+            format!("{}", x("int g() { const int i = 0; i = 3; }").unwrap_err()));
+    }
+
+    #[test]
+    fn type_check_const_assignment_array_panic() {
+        assert_eq!(
+            "*stdin*:1:26: Cannot assign to const variable here",
+            format!("{}", x("int g() { const int i[3]; i[0] = 3; }").unwrap_err()));
+    }
+
+    #[test]
+    fn type_check_const_assignment_pointer_panic() {
+        assert_eq!(
+            "*stdin*:1:24: Cannot assign to const variable here",
+            format!("{}", x("int g() { const int* i; *i = 3; }").unwrap_err()));
     }
 }

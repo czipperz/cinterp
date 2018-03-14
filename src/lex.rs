@@ -119,6 +119,7 @@ pub enum Token {
     KeywordInt,
     KeywordLong,
     KeywordVoid,
+    Star,
     Semicolon,
     OpenParen,
     CloseParen,
@@ -155,9 +156,9 @@ impl<I: Iterator<Item = io::Result<char>>> Lexer<I> {
         }
     }
 
-    pub fn push(&mut self, t: Tag<Token>) {
-        self.reserve.push(t);
-    }
+    // pub fn push(&mut self, t: Tag<Token>) {
+    //     self.reserve.push(t);
+    // }
 }
 
 impl<I: Iterator<Item = io::Result<char>>> Iterator for Lexer<I> {
@@ -193,6 +194,8 @@ impl<I: Iterator<Item = io::Result<char>>> Iterator for Lexer<I> {
                             }
                         }
                         break 'outer Some(Ok(Tag::new(Macro(vec), ch.pos)));
+                    } else if ch.value == '*' {
+                        break 'outer Some(Ok(Tag::new(Star, ch.pos)));
                     } else if ch.value == ';' {
                         break 'outer Some(Ok(Tag::new(Semicolon, ch.pos)));
                     } else if ch.value == ',' {
@@ -247,8 +250,9 @@ impl<I: Iterator<Item = io::Result<char>>> Iterator for Lexer<I> {
                                     if cc.value.is_alphanumeric() || cc.value == '_' {
                                         label.push(cc.value);
                                         c = self.iter.next();
-                                    } else if cc.value.is_whitespace() || cc.value == '(' || cc.value == ')' || cc.value == ',' ||
-                                        cc.value == '[' || cc.value == ']' || cc.value == '{' || cc.value == '}' || cc.value == ';' {
+                                    } else if (cc.value.is_whitespace() || cc.value == '(' || cc.value == ')' || cc.value == ',' ||
+                                               cc.value == '[' || cc.value == ']' || cc.value == '{' || cc.value == '}' ||
+                                               cc.value == ';' || cc.value == '*') {
                                             self.iter.push(cc);
                                             break 'outer Some(Ok(Tag::new(Label(label), start_pos)));
                                         } else {
@@ -446,5 +450,15 @@ mod test {
     } else
         3
 }").unwrap());
+    }
+
+    #[test]
+    fn lex_variable_pointer() {
+        assert_eq!(
+            vec![Tag::new(Label("int".to_owned()), pos(1, 0)),
+                 Tag::new(Star, pos(1, 3)),
+                 Tag::new(Label("i".to_owned()), pos(1, 5)),
+                 Tag::new(Semicolon, pos(1, 6)),],
+            lex("int* i;").unwrap());
     }
 }

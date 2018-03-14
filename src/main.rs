@@ -13,11 +13,20 @@ use std::io;
 use std::fs;
 use std::process;
 use std::error::Error;
+use std::collections::HashMap;
 use lex::*;
 use preprocess::*;
 use parse::*;
 use type_check::*;
 use pos::*;
+
+fn exec_command_line<I: Iterator<Item = io::Result<char>>>(input: I, globals: &mut HashMap<String, Tag<Type>>) -> io::Result<Vec<Result<Tag<Declaration>, Tag<Statement>>>> {
+    let tokens = Lexer::new("*stdin*", input);
+    let tokens = Preprocessor::new(tokens);
+    let syntax_tree = try!(parse_command_line(tokens));
+    try!(type_check_command_line(syntax_tree.iter(), globals));
+    Ok(syntax_tree)
+}
 
 fn exec<I: Iterator<Item = io::Result<char>>>(input: I) -> io::Result<Vec<Tag<Declaration>>> {
     let tokens = Lexer::new("*stdin*", input);
@@ -34,6 +43,7 @@ struct Options {
 }
 
 fn command_line() {
+    let mut globals = HashMap::new();
     let mut input = String::new();
     loop {
         use std::io::Write;
@@ -44,7 +54,7 @@ fn command_line() {
         if input == ":exit\n" {
             return;
         }
-        match exec(input.chars().map(Ok)) {
+        match exec_command_line(input.chars().map(Ok), &mut globals) {
             Ok(syntax_trees) => {
                 let mut first = true;
                 for syntax_tree in syntax_trees {
@@ -53,7 +63,10 @@ fn command_line() {
                     } else {
                         print!(" ");
                     }
-                    print!("{}", syntax_tree.value);
+                    match syntax_tree {
+                        Ok(declaration) => print!("{}", declaration.value),
+                        Err(statement) => print!("{}", statement.value),
+                    }
                 }
                 println!("");
             },
@@ -69,7 +82,7 @@ fn main() {
     } else {
         for file in options.rest {
             use std::io::Read;
-            let mut file = io::BufReader::new(fs::File::open(file).unwrap());
+            let file = io::BufReader::new(fs::File::open(file).unwrap());
             match exec(file.bytes().map(|b| b.map(|b| b as char))) {
                 Ok(_) => (),
                 Err(e) => {
